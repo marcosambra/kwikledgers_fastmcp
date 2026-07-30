@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import sys
+import types
+import unittest
+from unittest.mock import patch
+
+from kwikledgers_fastmcp.server import build_daily_summary_provider, build_server_metadata, build_tracking_sync_adapter
+
+
+class FastMcpDailySummaryProviderTestCase(unittest.TestCase):
+    def test_fetch_daily_summary_reads_legacy_payload(self) -> None:
+        provider = build_daily_summary_provider()
+
+        with patch("kwikledgers_fastmcp.domains.azure_devops.read_services.ensure_legacy_import_path"):
+            fake_package = types.ModuleType("azure_devops")
+            fake_server = types.ModuleType("azure_devops.server")
+            fake_server._get_my_daily_summary = lambda: '{"counts": {"assigned_items": 2, "blocked_items": 1}}'
+            fake_package.server = fake_server
+            with patch.dict(sys.modules, {"azure_devops": fake_package, "azure_devops.server": fake_server}):
+                result = provider.fetch_daily_summary()
+
+        self.assertEqual(result["counts"]["assigned_items"], 2)
+
+    def test_fetch_daily_summary_rejects_invalid_json(self) -> None:
+        provider = build_daily_summary_provider()
+
+        with patch("kwikledgers_fastmcp.domains.azure_devops.read_services.ensure_legacy_import_path"):
+            fake_package = types.ModuleType("azure_devops")
+            fake_server = types.ModuleType("azure_devops.server")
+            fake_server._get_my_daily_summary = lambda: "{"
+            fake_package.server = fake_server
+            with patch.dict(sys.modules, {"azure_devops": fake_package, "azure_devops.server": fake_server}):
+                with self.assertRaises(RuntimeError):
+                    provider.fetch_daily_summary()
+
+
+class FastMcpServerTestCase(unittest.TestCase):
+    def test_build_server_metadata_reports_first_real_capability(self) -> None:
+        metadata = build_server_metadata()
+
+        self.assertEqual(metadata["name"], "kwikledgers-fastmcp")
+        self.assertEqual(metadata["status"], "partial_implementation")
+        self.assertEqual(metadata["domains"], ["azure_devops", "local_tracking", "windows"])
+        self.assertEqual(metadata["capabilities"]["daily_summary"], "legacy_compatible_read_only")
+
+
+class FastMcpTrackingSyncAdapterTestCase(unittest.TestCase):
+    def test_sync_daily_tracking_calls_legacy_tracking_server(self) -> None:
+        adapter = build_tracking_sync_adapter()
+
+        with patch("kwikledgers_fastmcp.domains.local_tracking.services.ensure_legacy_import_path"):
+            fake_package = types.ModuleType("local_tracking")
+            fake_server = types.ModuleType("local_tracking.server")
+
+            def fake_sync(
+                summary: str,
+                actions_taken: list[str],
+                log_title: str | None,
+                log_details: str | None,
+                metrics_title: str | None,
+                metrics_summary: str | None,
+                source: str,
+            ) -> str:
+                self.assertIn("fastmcp_local_tracking_adapter", actions_taken)
+                self.assertEqual(source, "test-source")
+                self.assertIn('"assigned_items": 2', summary)
+                self.assertEqual(log_title, "Resumo diario executado pelo runtime LangGraph via FastMCP.")
+                self.assertEqual(metrics_title, "Resumo diario executado pelo runtime LangGraph via FastMCP.")
+                return "tracking synced"
+
+            fake_server._sync_daily_tracking = fake_sync
+            fake_package.server = fake_server
+            with patch.dict(sys.modules, {"local_tracking": fake_package, "local_tracking.server": fake_server}):
+                result = adapter.sync_daily_tracking({"counts": {"assigned_items": 2}}, "test-source")
+
+        self.assertEqual(result, "tracking synced")
+
+
+if __name__ == "__main__":
+    unittest.main()
