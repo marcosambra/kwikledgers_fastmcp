@@ -12,10 +12,11 @@ Resultado:
 
 - o pacote `kwikledgers-fastmcp` executou `5` testes com sucesso
 - o selector do LangGraph e a CLI principal mantiveram `13` testes focados verdes
-- a suíte completa do LangGraph terminou verde com `94` testes
+- a suíte completa do LangGraph terminou verde com `95` testes
 
 Escopo coberto:
 
 - adapter FastMCP para `windows_calendar._send_notification`
 - selector do LangGraph atualizado para usar notificacao FastMCP quando `backend=fastmcp`
 - preservacao do mesmo contrato do fluxo `daily_summary`, agora sem depender diretamente de `LegacyNotificationAdapter` nesse backend
+- tratamento explicito no grafo do `daily_summary` para registrar falha real quando a notificacao devolve erro do bridge legado
