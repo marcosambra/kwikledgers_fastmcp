@@ -5,7 +5,12 @@ import types
 import unittest
 from unittest.mock import patch
 
-from kwikledgers_fastmcp.server import build_daily_summary_provider, build_server_metadata, build_tracking_sync_adapter
+from kwikledgers_fastmcp.server import (
+    build_daily_summary_provider,
+    build_notification_adapter,
+    build_server_metadata,
+    build_tracking_sync_adapter,
+)
 
 
 class FastMcpDailySummaryProviderTestCase(unittest.TestCase):
@@ -75,6 +80,32 @@ class FastMcpTrackingSyncAdapterTestCase(unittest.TestCase):
                 result = adapter.sync_daily_tracking({"counts": {"assigned_items": 2}}, "test-source")
 
         self.assertEqual(result, "tracking synced")
+
+
+class FastMcpNotificationAdapterTestCase(unittest.TestCase):
+    def test_send_daily_summary_notification_calls_legacy_windows_server(self) -> None:
+        adapter = build_notification_adapter()
+
+        with patch("kwikledgers_fastmcp.domains.windows.services.ensure_legacy_import_path"):
+            fake_package = types.ModuleType("windows_calendar")
+            fake_server = types.ModuleType("windows_calendar.server")
+
+            def fake_send_notification(title: str, message: str, urgency: str = "normal") -> str:
+                self.assertEqual(title, "Resumo diario disponivel")
+                self.assertEqual(urgency, "high")
+                self.assertIn("FastMCP", message)
+                self.assertIn("Itens atribuidos: 3", message)
+                self.assertIn("Bloqueados: 1", message)
+                return "notification sent"
+
+            fake_server._send_notification = fake_send_notification
+            fake_package.server = fake_server
+            with patch.dict(sys.modules, {"windows_calendar": fake_package, "windows_calendar.server": fake_server}):
+                result = adapter.send_daily_summary_notification(
+                    {"counts": {"assigned_items": 3, "blocked_items": 1, "open_prs": 2}}
+                )
+
+        self.assertEqual(result, "notification sent")
 
 
 if __name__ == "__main__":

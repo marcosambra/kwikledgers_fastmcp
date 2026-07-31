@@ -5,6 +5,7 @@ from typing import Any
 
 from kwikledgers_fastmcp.domains.azure_devops import FastMcpDailySummaryProvider
 from kwikledgers_fastmcp.domains.local_tracking import FastMcpTrackingSyncAdapter
+from kwikledgers_fastmcp.domains.windows import FastMcpNotificationAdapter
 
 
 def build_server_metadata() -> dict[str, Any]:
@@ -27,6 +28,10 @@ def build_daily_summary_provider() -> FastMcpDailySummaryProvider:
 
 def build_tracking_sync_adapter() -> FastMcpTrackingSyncAdapter:
     return FastMcpTrackingSyncAdapter()
+
+
+def build_notification_adapter() -> FastMcpNotificationAdapter:
+    return FastMcpNotificationAdapter()
 
 
 def main() -> int:

@@ -114,7 +114,7 @@ Validation:
 
 Status update:
 - The `daily_summary` path now also routes local tracking writes through a FastMCP adapter bridge.
-- Windows notifications remain outside this slice, so the LangGraph `daily_summary` flow is still hybrid only at the notification edge.
+- The `daily_summary` path now also routes notifications through a FastMCP Windows bridge, while the environment-specific implementation still reuses the current legacy integration.
 
 ### Slice 4. Azure Preview Primitives
 

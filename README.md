@@ -164,4 +164,6 @@ The `daily_summary` slice now covers two FastMCP-owned seams so far:
 - Azure read-only provider bridge
 - local tracking sync bridge
 
+It now also includes a Windows notification bridge for `daily_summary`, still backed by the current legacy integration while the environment-sensitive migration remains isolated.
+
 Notifications, preview builders, execute primitives, and transport registration remain outside this slice.
