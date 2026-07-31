@@ -11,10 +11,11 @@ from kwikledgers_fastmcp.domains.windows import FastMcpNotificationAdapter
 def build_server_metadata() -> dict[str, Any]:
     return {
         "name": "kwikledgers-fastmcp",
-        "status": "partial_implementation",
+        "status": "paused_partial_implementation",
         "domains": ["azure_devops", "local_tracking", "windows"],
+        "active_runtime_path": "kwikledgers_langgraph",
         "capabilities": {
-            "daily_summary": "legacy_compatible_read_only",
+            "daily_summary": "frozen_legacy_compatible_slice",
             "story_pull_request": "planned",
             "story_branch_association": "planned",
             "story_status_transition": "planned",

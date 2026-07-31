@@ -2,7 +2,7 @@
 
 Blueprint directory for the future FastMCP runtime that will replace the transport layer currently concentrated in `agent/mcp_servers/`.
 
-This directory started as a minimal Python scaffold, but it already carries the first real FastMCP capability slice for `daily_summary`: an Azure read-only provider bridge plus the local tracking sync bridge. The package still remains intentionally partial while preview builders, execute primitives, Windows integrations, and transport registration are migrated in later slices.
+This directory started as a minimal Python scaffold and reached an initial `daily_summary` slice, but its evolution is currently paused by architectural decision. The active runtime path remains in `kwikledgers_langgraph/`, and this package is now kept as a frozen reference until a future decision explicitly resumes the migration.
 
 ## Purpose
 
@@ -148,6 +148,7 @@ LangGraph should own:
 - no deletion of `agent/mcp_servers/`;
 - no reimplementation of mutable flows inside MCP;
 - no change to the current approval-first operational contract.
+- no new FastMCP implementation slices while the migration remains paused.
 
 ## Next Artifact
 
@@ -156,9 +157,9 @@ See `ROADMAP.md` in this directory for the recommended migration order, slices, 
 ## Current Scaffold Status
 
 - `pyproject.toml` defines the standalone package boundary.
-- `src/kwikledgers_fastmcp/server.py` now exposes the first real capability seam for `daily_summary` as a legacy-compatible Azure read-only provider.
+- `src/kwikledgers_fastmcp/server.py` now exposes metadata that marks this package as a paused partial implementation.
 - `src/kwikledgers_fastmcp/shared/contracts.py` starts the shared contract layer.
-- `tests/test_server.py` validates the metadata and the first FastMCP read-only provider bridge.
+- `tests/test_server.py` validates the paused metadata plus the frozen compatibility bridges already present in this package.
 
 The `daily_summary` slice now covers two FastMCP-owned seams so far:
 - Azure read-only provider bridge
@@ -166,4 +167,4 @@ The `daily_summary` slice now covers two FastMCP-owned seams so far:
 
 It now also includes a Windows notification bridge for `daily_summary`, still backed by the current legacy integration while the environment-sensitive migration remains isolated.
 
-Notifications, preview builders, execute primitives, and transport registration remain outside this slice.
+Notifications, preview builders, execute primitives, and transport registration remain outside any active migration plan while this repository stays paused.

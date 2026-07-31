@@ -2,6 +2,14 @@
 
 Roadmap for migrating the current MCP runtime into `kwikledgers_fastmcp/` while keeping `kwikledgers_langgraph/` as the owner of workflow, preview-first policy, approval replay, and resumable execution.
 
+## Current Decision
+
+The FastMCP migration is currently paused.
+
+- `kwikledgers_langgraph/` remains the only active runtime path.
+- `kwikledgers_fastmcp/` stays as a frozen reference for the slices already explored.
+- No new FastMCP migration slices should be opened until a new architectural decision explicitly reactivates this roadmap.
+
 ## Migration Order
 
 1. Freeze contracts and compatibility seams.

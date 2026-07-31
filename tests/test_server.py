@@ -41,13 +41,14 @@ class FastMcpDailySummaryProviderTestCase(unittest.TestCase):
 
 
 class FastMcpServerTestCase(unittest.TestCase):
-    def test_build_server_metadata_reports_first_real_capability(self) -> None:
+    def test_build_server_metadata_reports_paused_partial_state(self) -> None:
         metadata = build_server_metadata()
 
         self.assertEqual(metadata["name"], "kwikledgers-fastmcp")
-        self.assertEqual(metadata["status"], "partial_implementation")
+        self.assertEqual(metadata["status"], "paused_partial_implementation")
         self.assertEqual(metadata["domains"], ["azure_devops", "local_tracking", "windows"])
-        self.assertEqual(metadata["capabilities"]["daily_summary"], "legacy_compatible_read_only")
+        self.assertEqual(metadata["active_runtime_path"], "kwikledgers_langgraph")
+        self.assertEqual(metadata["capabilities"]["daily_summary"], "frozen_legacy_compatible_slice")
 
 
 class FastMcpTrackingSyncAdapterTestCase(unittest.TestCase):
