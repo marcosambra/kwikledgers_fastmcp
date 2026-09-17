@@ -4,11 +4,11 @@ Roadmap for migrating the current MCP runtime into `kwikledgers_fastmcp/` while 
 
 ## Current Decision
 
-The FastMCP migration is currently paused.
+The FastMCP migration is active.
 
-- `kwikledgers_langgraph/` remains the only active runtime path.
-- `kwikledgers_fastmcp/` stays as a frozen reference for the slices already explored.
-- No new FastMCP migration slices should be opened until a new architectural decision explicitly reactivates this roadmap.
+- `kwikledgers_langgraph/` remains the owner of every workflow and governance rule.
+- `kwikledgers_fastmcp/` now exposes the complete atomic capability catalog through a real FastMCP registry.
+- The current implementation is compatibility-backed by the legacy dispatchers until each domain receives transport-free services.
 
 ## Migration Order
 
@@ -45,8 +45,8 @@ Validation:
 - golden fixtures for `daily_summary`, branch-association preview, story PR preview, and mutable-flow state expectations.
 
 Status update:
-- A first LangGraph backend selector seam now exists and still defaults to `legacy`.
-- The `kwikledgers_fastmcp/` package scaffold now exists, but all capabilities remain intentionally unimplemented.
+- A first LangGraph backend selector seam exists and still defaults to `legacy`.
+- The FastMCP registry now exposes all Azure DevOps, local tracking, and Windows atomic capabilities through a compatibility gateway.
 
 ### Slice 1. Azure Service Extraction
 

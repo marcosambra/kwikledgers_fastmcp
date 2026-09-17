@@ -7,7 +7,12 @@ requires-python = ">=3.10,<4.0"
 authors = [
     { name = "KwikLedgers", email = "dev@kwikledgers.com" }
 ]
-dependencies = []
+dependencies = [
+    "fastmcp>=2.0,<3.0",
+    "azure-devops>=7.1.0b1,<8.0.0",
+    "msrest>=0.7.1,<0.8.0",
+    "python-dotenv>=1.0,<2.0",
+]
 
 [project.scripts]
 kwikledgers-fastmcp = "kwikledgers_fastmcp.server:main"

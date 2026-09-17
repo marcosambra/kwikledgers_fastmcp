@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 import unittest
@@ -7,9 +8,16 @@ from unittest.mock import patch
 
 from kwikledgers_fastmcp.server import (
     build_daily_summary_provider,
+    build_fastmcp_server,
     build_notification_adapter,
     build_server_metadata,
     build_tracking_sync_adapter,
+    get_my_daily_summary,
+)
+from kwikledgers_fastmcp.shared.legacy_gateway import (
+    CAPABILITY_CATALOG,
+    CapabilityDefinition,
+    invoke_legacy_capability,
 )
 
 
@@ -41,14 +49,60 @@ class FastMcpDailySummaryProviderTestCase(unittest.TestCase):
 
 
 class FastMcpServerTestCase(unittest.TestCase):
-    def test_build_server_metadata_reports_paused_partial_state(self) -> None:
+    def test_build_server_metadata_reports_active_read_only_transport(self) -> None:
         metadata = build_server_metadata()
 
         self.assertEqual(metadata["name"], "kwikledgers-fastmcp")
-        self.assertEqual(metadata["status"], "paused_partial_implementation")
+        self.assertEqual(metadata["status"], "active_daily_summary_transport")
         self.assertEqual(metadata["domains"], ["azure_devops", "local_tracking", "windows"])
         self.assertEqual(metadata["active_runtime_path"], "kwikledgers_langgraph")
-        self.assertEqual(metadata["capabilities"]["daily_summary"], "frozen_legacy_compatible_slice")
+        self.assertEqual(metadata["capabilities"]["get_my_daily_summary"], "active_read_capability")
+
+    def test_build_fastmcp_server_creates_transport_instance(self) -> None:
+        server = build_fastmcp_server()
+
+        self.assertEqual(server.name, "kwikledgers-fastmcp")
+
+    def test_build_fastmcp_server_registers_the_full_capability_catalog(self) -> None:
+        tools = asyncio.run(build_fastmcp_server().get_tools())
+
+        self.assertEqual(set(tools), {definition.name for definition in CAPABILITY_CATALOG})
+
+    def test_get_my_daily_summary_delegates_to_the_provider(self) -> None:
+        class FakeProvider:
+            def fetch_daily_summary(self) -> dict[str, Any]:
+                return {"counts": {"assigned_items": 3}}
+
+        result = get_my_daily_summary(FakeProvider())
+
+        self.assertEqual(result["counts"]["assigned_items"], 3)
+
+
+class LegacyGatewayTestCase(unittest.TestCase):
+    def test_invoke_legacy_capability_normalizes_json_result(self) -> None:
+        definition = CapabilityDefinition("get_my_daily_summary", "azure_devops", "read", "test")
+        fake_package = types.ModuleType("azure_devops")
+        fake_server = types.ModuleType("azure_devops.server")
+
+        async def dispatch(name: str, arguments: dict[str, object]) -> str:
+            self.assertEqual(name, "get_my_daily_summary")
+            self.assertEqual(arguments, {})
+            return '{"counts":{"assigned_items":2}}'
+
+        fake_server._dispatch = dispatch
+        fake_package.server = fake_server
+        with patch("kwikledgers_fastmcp.shared.legacy_gateway.ensure_legacy_import_path"):
+            with patch.dict(sys.modules, {"azure_devops": fake_package, "azure_devops.server": fake_server}):
+                result = asyncio.run(invoke_legacy_capability(definition))
+
+        self.assertEqual(result["domain"], "azure_devops")
+        self.assertEqual(result["data"]["counts"]["assigned_items"], 2)
+
+    def test_invoke_legacy_capability_rejects_workflow_fields(self) -> None:
+        definition = CapabilityDefinition("get_my_daily_summary", "azure_devops", "read", "test")
+
+        with self.assertRaises(ValueError):
+            asyncio.run(invoke_legacy_capability(definition, {"approved": True}))
 
 
 class FastMcpTrackingSyncAdapterTestCase(unittest.TestCase):

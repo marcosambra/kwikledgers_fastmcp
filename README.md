@@ -2,7 +2,7 @@
 
 Blueprint directory for the future FastMCP runtime that will replace the transport layer currently concentrated in `agent/mcp_servers/`.
 
-This directory started as a minimal Python scaffold and reached an initial `daily_summary` slice, but its evolution is currently paused by architectural decision. The active runtime path remains in `kwikledgers_langgraph/`, and this package is now kept as a frozen reference until a future decision explicitly resumes the migration.
+This directory now exposes the FastMCP capability transport for Azure DevOps, local tracking, and Windows. The active runtime path remains in `kwikledgers_langgraph/`, which owns workflow and governance while FastMCP owns atomic integration capabilities.
 
 ## Purpose
 
@@ -142,29 +142,24 @@ LangGraph should own:
 - Rollout seam: feature flags per domain and per capability.
 - Observability seam: keep `AI_Tracking` and audit output consistent enough to compare both runtimes.
 
-## Immediate Non-Goals
+## Current Migration Boundary
 
-- no runtime code migration in this slice;
 - no deletion of `agent/mcp_servers/`;
 - no reimplementation of mutable flows inside MCP;
 - no change to the current approval-first operational contract.
-- no new FastMCP implementation slices while the migration remains paused.
+- no workflow rule, approval policy, or resumable state inside FastMCP handlers.
 
 ## Next Artifact
 
 See `ROADMAP.md` in this directory for the recommended migration order, slices, risks, and validation strategy.
 
-## Current Scaffold Status
+## Current Capability Status
 
 - `pyproject.toml` defines the standalone package boundary.
-- `src/kwikledgers_fastmcp/server.py` now exposes metadata that marks this package as a paused partial implementation.
+- `src/kwikledgers_fastmcp/server.py` now exposes a real FastMCP tool registry for the Azure DevOps, local tracking, and Windows capability catalog.
 - `src/kwikledgers_fastmcp/shared/contracts.py` starts the shared contract layer.
 - `tests/test_server.py` validates the paused metadata plus the frozen compatibility bridges already present in this package.
 
-The `daily_summary` slice now covers two FastMCP-owned seams so far:
-- Azure read-only provider bridge
-- local tracking sync bridge
+All registered capabilities currently delegate to the legacy domain dispatchers through a compatibility gateway. This keeps payload behavior stable while service extraction and LangGraph backend switching are completed in subsequent slices.
 
-It now also includes a Windows notification bridge for `daily_summary`, still backed by the current legacy integration while the environment-sensitive migration remains isolated.
-
-Notifications, preview builders, execute primitives, and transport registration remain outside any active migration plan while this repository stays paused.
+The ownership and parity map is maintained in [docs/ownership-parity-matrix.md](docs/ownership-parity-matrix.md).

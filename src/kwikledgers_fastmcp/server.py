@@ -3,22 +3,27 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from fastmcp import FastMCP
+
 from kwikledgers_fastmcp.domains.azure_devops import FastMcpDailySummaryProvider
 from kwikledgers_fastmcp.domains.local_tracking import FastMcpTrackingSyncAdapter
 from kwikledgers_fastmcp.domains.windows import FastMcpNotificationAdapter
+from kwikledgers_fastmcp.shared.legacy_gateway import (
+    CAPABILITY_CATALOG,
+    CapabilityDefinition,
+    invoke_legacy_capability,
+)
 
 
 def build_server_metadata() -> dict[str, Any]:
     return {
         "name": "kwikledgers-fastmcp",
-        "status": "paused_partial_implementation",
+        "status": "active_daily_summary_transport",
         "domains": ["azure_devops", "local_tracking", "windows"],
         "active_runtime_path": "kwikledgers_langgraph",
         "capabilities": {
-            "daily_summary": "frozen_legacy_compatible_slice",
-            "story_pull_request": "planned",
-            "story_branch_association": "planned",
-            "story_status_transition": "planned",
+            definition.name: f"active_{definition.operation}_capability"
+            for definition in CAPABILITY_CATALOG
         },
     }
 
@@ -35,8 +40,45 @@ def build_notification_adapter() -> FastMcpNotificationAdapter:
     return FastMcpNotificationAdapter()
 
 
+def get_my_daily_summary(
+    provider: FastMcpDailySummaryProvider | None = None,
+) -> dict[str, Any]:
+    """Return the normalized Azure daily summary without workflow side effects."""
+    return (provider or build_daily_summary_provider()).fetch_daily_summary()
+
+
+def build_fastmcp_server() -> FastMCP:
+    mcp = FastMCP(
+        "kwikledgers-fastmcp",
+        instructions=(
+            "Expose only atomic KwikLedgers integration capabilities. "
+            "Workflow sequencing, approval, replay, and governance are owned by LangGraph."
+        ),
+    )
+
+    for definition in CAPABILITY_CATALOG:
+        mcp.tool(
+            name=definition.name,
+            description=(
+                f"[{definition.domain}/{definition.operation}] {definition.description} "
+                "Regras de processo, aprovação e replay pertencem ao LangGraph."
+            ),
+        )(_build_capability_handler(definition))
+
+    return mcp
+
+
+def _build_capability_handler(definition: CapabilityDefinition) -> Any:
+    async def capability_handler(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await invoke_legacy_capability(definition, arguments)
+
+    capability_handler.__name__ = definition.name
+    capability_handler.__doc__ = definition.description
+    return capability_handler
+
+
 def main() -> int:
-    print(json.dumps(build_server_metadata(), indent=2, ensure_ascii=False))
+    build_fastmcp_server().run()
     return 0
 
 
