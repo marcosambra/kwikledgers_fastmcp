@@ -5,6 +5,7 @@
 - **FastMCP** registra tools, valida schemas, normaliza payloads e executa capacidades atômicas dos domínios.
 - **LangGraph** é dono de todas as regras de processo, aprovação, replay, lifecycle, sequência e coordenação entre domínios.
 - As regras de `AGENTS.md` e `agent/kwikledgers.agent.md` não podem ser embutidas em handlers FastMCP.
+- Toda capability FastMCP de tipo `execute` exige uma capability HMAC curta, emitida pelo LangGraph após os guardrails. O FastMCP apenas valida ação, digest do payload e expiração.
 
 ## Regras do Agente
 
@@ -35,6 +36,7 @@
 | Camada | Estado | Observação |
 |---|---|---|
 | FastMCP transport | Ativo | Registry FastMCP registra as 30 capabilities atômicas. |
+| FastMCP execute authorization | Ativo | Tools `execute` exigem capability HMAC emitida pelo LangGraph com ação, digest, run, request e expiração. |
 | FastMCP domain implementation | Compatibilidade | Gateway delega temporariamente aos dispatchers legados. |
 | LangGraph processos | Ativo | Mantém guardrails, replay, status flow e workflows existentes. |
 | Migração de serviços puros | Pendente | Próximo passo é remover import direto dos módulos legados por domínio. |

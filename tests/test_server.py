@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import os
 import sys
 import types
 import unittest
@@ -103,6 +108,50 @@ class LegacyGatewayTestCase(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             asyncio.run(invoke_legacy_capability(definition, {"approved": True}))
+
+    def test_execute_capability_requires_signed_langgraph_token(self) -> None:
+        definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(invoke_legacy_capability(definition, {"story_id": 1, "status": "Closed"}))
+
+    def test_execute_capability_allows_signed_matching_payload(self) -> None:
+        definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
+        arguments = {"story_id": 1, "status": "Closed"}
+        token = self._build_execution_token(definition.name, arguments)
+        fake_package = types.ModuleType("azure_devops")
+        fake_server = types.ModuleType("azure_devops.server")
+
+        async def dispatch(name: str, received_arguments: dict[str, object]) -> str:
+            self.assertEqual(name, "update_story_status")
+            self.assertEqual(received_arguments, arguments)
+            return '{"status":"updated"}'
+
+        fake_server._dispatch = dispatch
+        fake_package.server = fake_server
+        with patch.dict(os.environ, {"KWIKLEDGERS_FASTMCP_EXECUTION_KEY": "test-key"}, clear=False):
+            with patch("kwikledgers_fastmcp.shared.legacy_gateway.ensure_legacy_import_path"):
+                with patch.dict(sys.modules, {"azure_devops": fake_package, "azure_devops.server": fake_server}):
+                    result = asyncio.run(
+                        invoke_legacy_capability(
+                            definition,
+                            {**arguments, "execution_capability": token},
+                        )
+                    )
+
+        self.assertEqual(result["data"]["status"], "updated")
+
+    def _build_execution_token(self, capability_name: str, arguments: dict[str, object]) -> str:
+        serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        payload = {
+            "capability": capability_name,
+            "payload_digest": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+        payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        encoded_payload = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
+        signature = hmac.new(b"test-key", payload_bytes, hashlib.sha256).hexdigest()
+        return f"{encoded_payload}.{signature}"
 
 
 class FastMcpTrackingSyncAdapterTestCase(unittest.TestCase):

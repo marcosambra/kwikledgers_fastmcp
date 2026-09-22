@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from kwikledgers_fastmcp.shared.execution_capability import verify_execution_capability
 from kwikledgers_fastmcp.shared.legacy_runtime import ensure_legacy_import_path
 
 
@@ -96,7 +97,14 @@ async def invoke_legacy_capability(
     arguments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_arguments = dict(arguments or {})
+    execution_capability = normalized_arguments.pop("execution_capability", None)
     _validate_atomic_request(normalized_arguments)
+    if definition.operation == "execute":
+        verify_execution_capability(
+            execution_capability,
+            capability_name=definition.name,
+            arguments=normalized_arguments,
+        )
     legacy_server = _server_module_for(definition.domain)
     result = await legacy_server._dispatch(definition.name, normalized_arguments)
     if isinstance(result, str):
