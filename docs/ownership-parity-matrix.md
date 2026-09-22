@@ -10,12 +10,12 @@
 
 | Regra | Dono | Capability FastMCP afetada | Flow LangGraph |
 |---|---|---|---|
-| Fluxo canônico de status | LangGraph | `get_story_details`, `update_story_status` | `story_status_transition` |
+| Fluxo canônico de status | LangGraph | `get_story_details`, `update_story_status` | `story_status_transition` via `story_status_policy.py` |
 | Preview antes de mutação | LangGraph | `preview_*`, `*_execute` | Todos os fluxos mutáveis |
 | Aprovação humana, `request_id` e replay | LangGraph | Nenhuma tool recebe campos de aprovação | Todos os fluxos mutáveis |
 | Associação de branch antes da PR | LangGraph | `preview_story_branch_association`, `associate_story_branch`, `create_story_pull_request` | `story_branch_association`, `story_pull_request` |
 | PR Draft antes de `Aguardando PR` | LangGraph | `create_story_pull_request`, `update_story_status` | `story_pull_request`, `story_status_transition` |
-| Fechamento com `ceil()` e preview de horas | LangGraph | `update_work_item_effort`, `update_story_status` | `task_closure` |
+| Fechamento com `ceil()` e preview de horas | LangGraph | `update_work_item_effort`, `update_story_status` | `task_closure` via `task_closure_policy.py` |
 | Registro obrigatório no tracking | LangGraph | `sync_daily_tracking`, `append_daily_action_log`, `record_ai_metrics` | Todos os flows de story |
 | Notificação obrigatória ou best-effort | LangGraph | `send_notification` | `daily_summary` e flows futuros |
 
