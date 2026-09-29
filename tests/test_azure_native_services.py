@@ -144,6 +144,14 @@ class NativeServiceTests(unittest.TestCase):
         return created
 
     def invoke(self, name: str, **arguments: Any) -> Any:
+        if name in {"update_story_status", "add_story_comment", "update_work_item_content", "update_work_item_effort", "move_work_item_to_next_sprint"} and "expected_revision" not in arguments and "expected_revisions" not in arguments:
+            target_id = arguments.get("work_item_id", arguments.get("story_id"))
+            arguments["expected_revision"] = self.items[target_id].rev
+        if name in {"associate_story_branch", "create_story_pull_request"} and "expected_revisions" not in arguments:
+            target_ids = {arguments["story_id"], *arguments.get("related_work_item_ids", [])}
+            if arguments.get("include_child_work_items", True):
+                target_ids.update(int(relation.url.rsplit("/", 1)[-1]) for relation in self.items[arguments["story_id"]].relations if relation.rel == "System.LinkTypes.Hierarchy-Forward")
+            arguments["expected_revisions"] = {str(key): self.items[key].rev for key in target_ids}
         return asyncio.run(invoke_azure_capability(name, arguments))["data"]
 
     def branch_request(self, **extra: Any) -> dict[str, Any]:
@@ -259,6 +267,7 @@ class NativeServiceTests(unittest.TestCase):
         result = self.invoke("preview_story_branch_association", **self.branch_request())
         self.assertEqual(result["parent_work_item"]["revision"], 7)
         self.assertEqual([entry["revision"] for entry in result["work_items"]], [7, 7])
+        self.assertEqual(result["expected_revisions"], {"1": 7, "2": 7})
 
     def test_large_work_item_query_is_batched(self) -> None:
         self.items = {value: item(value, f"Story {value}") for value in range(1, 211)}
@@ -338,7 +347,11 @@ class NativeServiceTests(unittest.TestCase):
         self.assertTrue(data["status_confirmed"])
 
     def test_status_mismatch_is_not_reported_as_success(self) -> None:
-        self.wit.update_work_item.side_effect = lambda **kwargs: self.get_item(kwargs["id"])
+        def mismatched_item(**kwargs: Any) -> Any:
+            result = self.get_item(kwargs["id"])
+            result.rev += 1
+            return result
+        self.wit.update_work_item.side_effect = mismatched_item
         for name, arguments in (
             ("update_story_status", {"story_id": 1, "status": "Closed"}),
             ("update_work_item_content", {"work_item_id": 1, "status": "Closed"}),
@@ -388,8 +401,50 @@ class NativeServiceTests(unittest.TestCase):
     def test_revision_map_guards_each_association_target(self) -> None:
         with self.assertRaisesRegex(AzureCapabilityError, "revision conflict"):
             self.invoke("associate_story_branch", **self.branch_request(expected_revisions={"1": 7, "2": 6}))
-        self.assertEqual(len(self.items[1].relations), 2)
+        self.assertEqual(len(self.items[1].relations), 1)
         self.assertEqual(len(self.items[2].relations), 0)
+        self.wit.update_work_item.assert_not_called()
+
+    def test_existing_mutations_require_revision_before_sdk_access(self) -> None:
+        for name, arguments in (
+            ("update_story_status", {"story_id": 1, "status": "Closed"}),
+            ("update_work_item_content", {"work_item_id": 1, "assigned_to": "dev@example.test"}),
+            ("update_work_item_effort", {"work_item_id": 1, "completed_work_hours": 3}),
+            ("move_work_item_to_next_sprint", {"work_item_id": 1}),
+            ("add_story_comment", {"story_id": 1, "comment": "Comment"}),
+            ("associate_story_branch", self.branch_request()),
+            ("create_story_pull_request", self.pr_request()),
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                asyncio.run(invoke_azure_capability(name, arguments))
+        self.wit.get_work_item.assert_not_called()
+        self.wit.update_work_item.assert_not_called()
+        self.git.create_pull_request.assert_not_called()
+
+    def test_pr_stale_or_incomplete_revision_map_has_no_side_effects(self) -> None:
+        for revisions in ({"1": 7}, {"1": 7, "2": 6}, {"1": 7, "2": 7, "4": 7}):
+            with self.subTest(revisions=revisions), self.assertRaises(AzureCapabilityError):
+                self.invoke("create_story_pull_request", **self.pr_request(expected_revisions=revisions))
+        self.wit.update_work_item.assert_not_called()
+        self.git.create_pull_request.assert_not_called()
+
+    def test_already_linked_items_still_require_current_preview_revision(self) -> None:
+        self.invoke("associate_story_branch", **self.branch_request())
+        self.wit.update_work_item.reset_mock()
+        with self.assertRaisesRegex(AzureCapabilityError, "revision conflict"):
+            self.invoke("create_story_pull_request", **self.pr_request(expected_revisions={"1": 7, "2": 7}))
+        self.wit.update_work_item.assert_not_called()
+        self.git.create_pull_request.assert_not_called()
+
+    def test_returned_sdk_revision_is_required_and_never_synthesized(self) -> None:
+        for returned_revision in (None, 7, 0):
+            result = self.get_item(1)
+            result.fields["System.State"] = "Closed"
+            result.rev = returned_revision
+            self.wit.update_work_item.side_effect = None
+            self.wit.update_work_item.return_value = result
+            with self.subTest(revision=returned_revision), self.assertRaises(AzureCapabilityError):
+                self.invoke("update_story_status", story_id=1, status="Closed", expected_revision=7)
 
     def test_revision_reader_returns_sdk_revision(self) -> None:
         self.assertEqual(work_item_revision(self.wit, 1), 7)
@@ -485,7 +540,7 @@ class NativeServiceTests(unittest.TestCase):
                     return {"message": value}
             if isinstance(value, dict):
                 return {key: normalize(child) if isinstance(child, (dict, list)) else child
-                        for key, child in value.items() if key not in {"revision", "current_status", "area_path", "recommended_story_status_transition"}}
+                        for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "recommended_story_status_transition"}}
             if isinstance(value, list):
                 return [normalize(child) for child in value]
             return value

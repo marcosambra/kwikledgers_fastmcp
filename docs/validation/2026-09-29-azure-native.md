@@ -22,6 +22,26 @@
 
 ## Scope And Change History
 
+## Review Fix Slice 2: Required Native Revisions
+
+- The native boundary requires a target revision for content, effort, status,
+  comment and next-sprint mutations. Branch and PR execution require a revision
+  map covering exactly all resolved parent, child and explicitly related items.
+- Branch preview exposes `expected_revisions` with JSON-string IDs. Execution
+  preflights every item, including already-linked items, before any writes.
+  A PR creation rechecks the targets after branch association and before Git
+  creation. Every relation write still carries its own atomic `test /rev`.
+- Missing, stale, incomplete or extra target guards fail without initial writes.
+  Successful SDK responses must identify the real target with an advanced
+  positive integer revision. Revision advancement uses only the returned value,
+  never a synthetic increment. Branch/PR execution returns the final map.
+- Validation: 54 tests passed with
+  `PYTHONPATH=src:tests .venv/bin/python -m unittest test_azure_native_services.NativeServiceTests test_azure_native_entrypoint -q`.
+- Files: `domains/azure_devops/{native,primitives,services}.py`,
+  `tests/test_azure_native_{services,entrypoint}.py` and this history artifact.
+- Multi-item branch/PR writes remain nontransactional. A race after preflight
+  may leave earlier successful writes persisted; no automatic retry occurs.
+
 All changes stay inside `domains/azure_devops/**`, `tests/test_azure_native*.py`
 and this artifact. The legacy `agent/**`, transport server, legacy gateway and
 execution-capability verifier are not edited. Existing dirty active-user changes

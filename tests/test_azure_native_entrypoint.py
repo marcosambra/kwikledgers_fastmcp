@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from kwikledgers_fastmcp.domains.azure_devops import FastMcpDailySummaryProvider, invoke_azure_capability
-from kwikledgers_fastmcp.domains.azure_devops.native import AzureCapabilityError, CAPABILITIES
+from kwikledgers_fastmcp.domains.azure_devops.native import AzureCapabilityError, CAPABILITIES, REVISION_REQUIRED_CAPABILITIES, REVISION_MAP_CAPABILITIES
 from kwikledgers_fastmcp.domains.azure_devops.primitives import EXPECTED_REVISIONS
 
 
@@ -29,9 +29,14 @@ class NativeEntrypointTests(unittest.TestCase):
         for name, (operation, _) in CAPABILITIES.items():
             for raw, expected in (("plain", {"message": "plain"}), ('{"ok": true}', {"ok": True})):
                 with self.subTest(name=name, raw=raw):
-                    with patch.dict(CAPABILITIES, {name: (operation, lambda: raw)}):
+                    arguments = {}
+                    if name in REVISION_REQUIRED_CAPABILITIES:
+                        arguments = {"story_id": 1, "expected_revision": 1}
+                    elif name in REVISION_MAP_CAPABILITIES:
+                        arguments = {"expected_revisions": {"1": 1}}
+                    with patch.dict(CAPABILITIES, {name: (operation, lambda **kwargs: raw)}):
                         with patch("kwikledgers_fastmcp.domains.azure_devops.native.load_configuration"):
-                            result = asyncio.run(invoke_azure_capability(name))
+                            result = asyncio.run(invoke_azure_capability(name, arguments))
                     self.assertEqual(result, {"capability": name, "domain": "azure_devops", "operation": operation, "data": expected})
 
     def test_active_user_remains_native(self) -> None:
@@ -78,14 +83,14 @@ class NativeEntrypointTests(unittest.TestCase):
     def test_sdk_http_conflict_code_remains_available_to_the_caller(self) -> None:
         from types import SimpleNamespace
 
-        def handler() -> str:
+        def handler(story_id: int) -> str:
             error = RuntimeError("revision conflict")
             error.response = SimpleNamespace(status_code=412)
             raise error
 
         with patch.dict(CAPABILITIES, {"update_story_status": ("execute", handler)}):
             with self.assertRaises(AzureCapabilityError) as raised:
-                asyncio.run(invoke_azure_capability("update_story_status"))
+                asyncio.run(invoke_azure_capability("update_story_status", {"story_id": 1, "expected_revision": 7}))
         self.assertEqual(raised.exception.status_code, 412)
         self.assertEqual(raised.exception.capability, "update_story_status")
 

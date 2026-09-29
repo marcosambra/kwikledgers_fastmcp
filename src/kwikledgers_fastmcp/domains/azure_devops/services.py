@@ -18,7 +18,7 @@ from azure.devops.v7_0.git.models import GitPullRequest, GitPullRequestSearchCri
 from azure.devops.v7_0.work_item_tracking.models import TeamContext, Wiql
 
 from .configuration import get_client, get_project, load_configuration, workspace_root
-from .primitives import update_work_item, validate_revision
+from .primitives import EXPECTED_REVISIONS, update_work_item, validate_revision
 
 
 DEFAULT_PULL_REQUEST_TARGET_BRANCH = "stage-pre-prod"
@@ -653,7 +653,7 @@ def _get_work_item_snapshot(wit: Any, work_item_id: int) -> dict[str, Any]:
     resolved_work_item_id = int(fields.get("System.Id") or work_item_id)
     return {
         "id": resolved_work_item_id,
-        "revision": getattr(item, "rev", None),
+        "revision": validate_revision(getattr(item, "rev", None)),
         "title": fields.get("System.Title"),
         "state": fields.get("System.State"),
         "work_item_type": fields.get("System.WorkItemType"),
@@ -820,12 +820,24 @@ def _build_story_branch_association_preview_payload(
         ],
         "include_child_work_items": bool(include_child_work_items),
         "work_items": work_items_preview,
+        "expected_revisions": {str(entry["id"]): entry["revision"] for entry in work_items_preview},
         "counts": {
             "total_work_items": len(work_items_preview),
             "already_linked": already_linked_count,
             "pending_link": pending_link_count,
         },
     }
+
+
+def _check_association_revisions(wit: Any, work_items: list[dict[str, Any]]) -> None:
+    expected = EXPECTED_REVISIONS.get()
+    target_ids = {int(entry["id"]) for entry in work_items}
+    if set(expected) != target_ids:
+        raise ValueError("expected_revisions must cover exactly every branch/PR target.")
+    for work_item_id in sorted(target_ids):
+        current = _get_work_item_snapshot(wit, work_item_id)
+        if current["revision"] != expected[work_item_id]:
+            raise RuntimeError(f"Azure revision conflict for work item {work_item_id}.")
 
 
 def _associate_artifact_to_work_items(
@@ -840,6 +852,8 @@ def _associate_artifact_to_work_items(
 
     for work_item in work_items:
         current_snapshot = _get_work_item_snapshot(wit, int(work_item["id"]))
+        if current_snapshot["revision"] != EXPECTED_REVISIONS.get().get(int(work_item["id"])):
+            raise RuntimeError(f"Azure revision conflict for work item {work_item['id']}.")
         current_artifact_links = _extract_artifact_links(
             current_snapshot.get("relations"),
             allowed_names={"Branch", "Pull Request"},
@@ -851,12 +865,13 @@ def _associate_artifact_to_work_items(
             already_linked_work_item_ids.append(int(work_item["id"]))
             action = "already_linked"
         else:
-            update_work_item(
+            updated_item = update_work_item(
                 wit,
                 document=[_build_artifact_link_patch(artifact_url, artifact_name)],
                 id=int(work_item["id"]),
                 observed_revision=current_snapshot.get("revision"),
             )
+            work_item["revision"] = validate_revision(updated_item.rev)
             associated_work_item_ids.append(int(work_item["id"]))
             action = "associated"
             work_item["existing_artifact_links"] = current_artifact_links + [
@@ -2655,6 +2670,7 @@ def _associate_story_branch(
         related_work_item_ids=related_work_item_ids,
         include_child_work_items=include_child_work_items,
     )
+    _check_association_revisions(wit, preview_payload["work_items"])
     association_result = _associate_artifact_to_work_items(
         wit,
         work_items=preview_payload["work_items"],
@@ -2665,6 +2681,7 @@ def _associate_story_branch(
         {
             "executed": True,
             "association_result": association_result,
+            "expected_revisions": {str(key): value for key, value in EXPECTED_REVISIONS.get().items()},
         }
     )
     return _format_json(preview_payload)
@@ -2766,6 +2783,7 @@ def _create_story_pull_request(
         mermaid_diagram=mermaid_diagram,
     )
 
+    _check_association_revisions(wit, preview_payload["branch_association_preview"]["work_items"])
     branch_association_result = _associate_artifact_to_work_items(
         wit,
         work_items=preview_payload["branch_association_preview"]["work_items"],
@@ -2776,6 +2794,7 @@ def _create_story_pull_request(
     pull_request_summary = preview_payload.get("existing_active_pull_request")
     created = False
     if pull_request_summary is None:
+        _check_association_revisions(wit, preview_payload["branch_association_preview"]["work_items"])
         created_pull_request = git.create_pull_request(
             GitPullRequest(
                 source_ref_name=preview_payload["source_ref_name"],
@@ -2837,6 +2856,7 @@ def _create_story_pull_request(
             "pull_request": pull_request_summary,
             "branch_association_result": branch_association_result,
             "pull_request_association_result": pull_request_association_result,
+            "expected_revisions": {str(key): value for key, value in EXPECTED_REVISIONS.get().items()},
             "message": (
                 "PR Draft criada com sucesso e link retornado ao usuario."
                 if created

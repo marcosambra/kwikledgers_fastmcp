@@ -37,6 +37,12 @@ CAPABILITIES: dict[str, tuple[str, Callable[..., str]]] = {
     "add_story_comment": ("execute", services._add_story_comment),
 }
 
+REVISION_REQUIRED_CAPABILITIES = {
+    "update_work_item_content", "update_work_item_effort", "move_work_item_to_next_sprint",
+    "update_story_status", "add_story_comment",
+}
+REVISION_MAP_CAPABILITIES = {"associate_story_branch", "create_story_pull_request"}
+
 
 class AzureCapabilityError(RuntimeError):
     """An Azure SDK failure with credential material removed."""
@@ -73,7 +79,17 @@ def _invoke(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         work_item_id = request.get("work_item_id", request.get("story_id"))
         if work_item_id is None:
             raise ValueError("expected_revision requires a work_item_id or story_id.")
-        expected[int(work_item_id)] = validate_revision(revision)
+        normalized_id = int(work_item_id)
+        validated_revision = validate_revision(revision)
+        if normalized_id in expected and expected[normalized_id] != validated_revision:
+            raise ValueError("Conflicting revision guards for the target work item.")
+        expected[normalized_id] = validated_revision
+    if name in REVISION_REQUIRED_CAPABILITIES:
+        target_id = request.get("work_item_id", request.get("story_id"))
+        if target_id is None or int(target_id) not in expected:
+            raise ValueError("expected_revision is required for an existing work item mutation.")
+    if name in REVISION_MAP_CAPABILITIES and not expected:
+        raise ValueError("expected_revisions is required for every branch/PR target.")
     if expected and (operation != "execute" or name in {"create_work_item", "save_technical_debt_preview_cache"}):
         raise ValueError("Revision guards apply only to existing work item mutations.")
     inspect.signature(handler).bind(**request)

@@ -25,11 +25,14 @@ def update_work_item(
     observed_revision: int | None = None,
 ) -> Any:
     revision = EXPECTED_REVISIONS.get().get(int(id), observed_revision)
+    revision = validate_revision(revision)
     guarded_document = list(document)
-    if revision is not None:
-        guarded_document.insert(0, {"op": "test", "path": "/rev", "value": validate_revision(revision)})
+    guarded_document.insert(0, {"op": "test", "path": "/rev", "value": revision})
     result = wit.update_work_item(document=guarded_document, id=id)
+    returned_revision = validate_revision(getattr(result, "rev", None))
+    if getattr(result, "id", None) != int(id) or returned_revision <= revision:
+        raise RuntimeError("Azure did not confirm the updated item and an advanced revision.")
     expected = EXPECTED_REVISIONS.get()
-    if int(id) in expected and getattr(result, "rev", None) is not None:
-        EXPECTED_REVISIONS.set({**expected, int(id): validate_revision(result.rev)})
+    if int(id) in expected:
+        EXPECTED_REVISIONS.set({**expected, int(id): returned_revision})
     return result
