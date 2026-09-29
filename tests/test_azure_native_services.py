@@ -53,7 +53,7 @@ class NativeServiceTests(unittest.TestCase):
         self.wit.query_by_wiql.side_effect = self.query
         self.wit.get_work_item_types.return_value = [SimpleNamespace(name=name) for name in ("Task", "User Story", "Technical Debt", "Bug", "Spike")]
         self.wit.get_work_item_type_fields_with_references.return_value = [
-            SimpleNamespace(reference_name=name) for name in services.WORK_ITEM_FIELD_ALIASES
+            SimpleNamespace(reference_name=name) for name in (*services.WORK_ITEM_FIELD_ALIASES, "System.State", "System.AssignedTo", "System.AreaPath")
         ]
         self.wit.create_work_item.side_effect = self.create_item
         self.wit.update_work_item.side_effect = self.update_item
@@ -203,6 +203,9 @@ class NativeServiceTests(unittest.TestCase):
         data = self.invoke("get_story_details", story_id=1)
         self.assertIn("=== KL-1: Parent story ===", data["message"])
         self.assertIn("[Closed] Closed task", data["message"])
+        self.assertEqual((data["id"], data["revision"], data["current_status"], data["work_item_type"]), (1, 7, "Active", "User Story"))
+        self.assertEqual(data["child_work_items"][0]["revision"], 7)
+        self.assertEqual(data["child_work_items"][0]["work_item_type"], "Task")
 
     def test_get_open_prs_filters_creator_and_handles_timezone(self) -> None:
         self.create_pr(SimpleNamespace(title="PR", source_ref_name="refs/heads/source", target_ref_name="refs/heads/target", is_draft=True))
@@ -331,6 +334,45 @@ class NativeServiceTests(unittest.TestCase):
         data = self.invoke("update_story_status", story_id=2, status="Custom process state", expected_revision=7)
         self.assertEqual(data["message"], "Historia KL-2 atualizada para: Custom process state")
         self.assertEqual(self.items[2].fields["System.State"], "Custom process state")
+        self.assertEqual((data["revision"], data["current_status"]), (8, "Custom process state"))
+        self.assertTrue(data["status_confirmed"])
+
+    def test_status_mismatch_is_not_reported_as_success(self) -> None:
+        self.wit.update_work_item.side_effect = lambda **kwargs: self.get_item(kwargs["id"])
+        for name, arguments in (
+            ("update_story_status", {"story_id": 1, "status": "Closed"}),
+            ("update_work_item_content", {"work_item_id": 1, "status": "Closed"}),
+            ("update_work_item_effort", {"work_item_id": 1, "completed_work_hours": 3, "status": "Closed"}),
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(AzureCapabilityError, "status mismatch"):
+                self.invoke(name, **arguments, expected_revision=7)
+
+    def test_task_closure_is_one_patch_and_preserves_remaining_work(self) -> None:
+        data = self.invoke("update_work_item_effort", work_item_id=1, completed_work_hours=3, status="Closed", expected_revision=7)
+        self.assertEqual((data["revision"], data["current_status"], data["completed_work_hours"]), (8, "Closed", 3))
+        self.wit.update_work_item.assert_called_once()
+        self.assertEqual(self.wit.update_work_item.call_args.kwargs["document"], [
+            {"op": "test", "path": "/rev", "value": 7},
+            {"op": "add", "path": "/fields/Microsoft.VSTS.Scheduling.CompletedWork", "value": 3},
+            {"op": "add", "path": "/fields/System.State", "value": "Closed"},
+        ])
+        self.assertEqual(self.items[1].fields["Microsoft.VSTS.Scheduling.RemainingWork"], 2)
+
+    def test_story_start_assignment_area_and_status_are_one_patch(self) -> None:
+        data = self.invoke("update_work_item_content", work_item_id=2, assigned_to="dev@example.test", area_path="Project\\Team", status="Active", expected_revision=7)
+        self.assertEqual(data["applied_fields"], ["assigned_to", "area_path", "status"])
+        self.assertEqual((data["revision"], data["current_status"], data["area_path"]), (8, "Active", "Project\\Team"))
+        self.wit.update_work_item.assert_called_once()
+        self.assertEqual([entry["path"] for entry in self.wit.update_work_item.call_args.kwargs["document"]], [
+            "/rev", "/fields/System.AssignedTo", "/fields/System.AreaPath", "/fields/System.State",
+        ])
+        self.assertEqual(self.items[2].fields["System.AssignedTo"], "dev@example.test")
+
+    def test_atomic_closure_rejects_unsupported_effort_without_closing(self) -> None:
+        self.wit.get_work_item_type_fields_with_references.return_value = [SimpleNamespace(reference_name="System.State")]
+        with self.assertRaisesRegex(AzureCapabilityError, "No requested effort"):
+            self.invoke("update_work_item_effort", work_item_id=1, completed_work_hours=3, status="Closed", expected_revision=7)
+        self.wit.update_work_item.assert_not_called()
 
     def test_add_story_comment_retains_text_and_revision_guard(self) -> None:
         data = self.invoke("add_story_comment", story_id=1, comment="Comment", expected_revision=7)
@@ -443,7 +485,7 @@ class NativeServiceTests(unittest.TestCase):
                     return {"message": value}
             if isinstance(value, dict):
                 return {key: normalize(child) if isinstance(child, (dict, list)) else child
-                        for key, child in value.items() if key not in {"revision", "recommended_story_status_transition"}}
+                        for key, child in value.items() if key not in {"revision", "current_status", "area_path", "recommended_story_status_transition"}}
             if isinstance(value, list):
                 return [normalize(child) for child in value]
             return value
@@ -458,4 +500,6 @@ class NativeServiceTests(unittest.TestCase):
                     self.items = copy.deepcopy(seed_items)
                     self.prs.clear()
                     actual = self.invoke(name, **arguments)
+                    if name in {"get_story_details", "update_story_status"}:
+                        actual = {"message": actual["message"]}
                     self.assertEqual(normalize(actual), normalize(expected))

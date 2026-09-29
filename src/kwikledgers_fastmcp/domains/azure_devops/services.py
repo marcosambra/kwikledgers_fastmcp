@@ -18,7 +18,7 @@ from azure.devops.v7_0.git.models import GitPullRequest, GitPullRequestSearchCri
 from azure.devops.v7_0.work_item_tracking.models import TeamContext, Wiql
 
 from .configuration import get_client, get_project, load_configuration, workspace_root
-from .primitives import update_work_item
+from .primitives import update_work_item, validate_revision
 
 
 DEFAULT_PULL_REQUEST_TARGET_BRANCH = "stage-pre-prod"
@@ -1959,11 +1959,13 @@ def _serialize_work_item_payload(item: Any, extra_payload: Optional[dict[str, An
     fields = getattr(item, "fields", {}) or {}
     payload = {
         "id": fields.get("System.Id", getattr(item, "id", None)),
-        "revision": getattr(item, "rev", None),
+        "revision": validate_revision(getattr(item, "rev", None)),
         "title": fields.get("System.Title"),
         "work_item_type": fields.get("System.WorkItemType"),
         "state": fields.get("System.State"),
+        "current_status": fields.get("System.State"),
         "assigned_to": _serialize_assigned_to(fields.get("System.AssignedTo")),
+        "area_path": fields.get("System.AreaPath"),
         "iteration_path": fields.get("System.IterationPath"),
         "story_points": fields.get("Microsoft.VSTS.Scheduling.StoryPoints"),
         "remaining_work_hours": fields.get("Microsoft.VSTS.Scheduling.RemainingWork"),
@@ -1974,6 +1976,14 @@ def _serialize_work_item_payload(item: Any, extra_payload: Optional[dict[str, An
     if extra_payload:
         payload.update(extra_payload)
     return _format_json(payload)
+
+
+def _confirm_work_item_status(item: Any, work_item_id: int, status: str | None) -> None:
+    if getattr(item, "id", None) != work_item_id:
+        raise RuntimeError("Azure returned a different work item after the update.")
+    validate_revision(getattr(item, "rev", None))
+    if status is not None and (getattr(item, "fields", {}) or {}).get("System.State") != status:
+        raise RuntimeError("Azure returned a status mismatch after the update.")
 
 
 def _is_blocked_item(fields: dict[str, Any]) -> bool:
@@ -2522,17 +2532,10 @@ def _get_story_details(story_id: int) -> str:
     connection = get_client()
     wit = connection.clients.get_work_item_tracking_client()
 
-    item = wit.get_work_item(id=story_id, fields=[
-        "System.Id", "System.Title", "System.Description", "System.State",
-        "Microsoft.VSTS.Common.AcceptanceCriteria",
-        "Microsoft.VSTS.Scheduling.StoryPoints",
-        "Microsoft.VSTS.Common.Priority",
-        "System.IterationPath", "System.AssignedTo",
-        "System.Tags"
-    ])
-    relation_item = wit.get_work_item(id=story_id, expand="Relations")
+    item = wit.get_work_item(id=story_id, expand="Relations")
 
     fields = item.fields
+    children: list[dict[str, Any]] = []
     lines = [
         f"=== KL-{story_id}: {fields['System.Title']} ===",
         f"Status: {fields['System.State']}",
@@ -2548,26 +2551,39 @@ def _get_story_details(story_id: int) -> str:
         "",
     ]
 
-    if relation_item.relations:
+    if item.relations:
         task_ids = [
             rel.url.split("/")[-1]
-            for rel in relation_item.relations
+            for rel in item.relations
             if rel.rel == "System.LinkTypes.Hierarchy-Forward"
         ]
         if task_ids:
             tasks = _get_work_items_in_batches(wit, ids=task_ids, fields=[
-                "System.Id", "System.Title", "System.State",
-                "Microsoft.VSTS.Scheduling.RemainingWork"
+                "System.Id", "System.Title", "System.State", "System.WorkItemType",
+                "System.AssignedTo", "System.AreaPath", "System.IterationPath",
+                "Microsoft.VSTS.Scheduling.StoryPoints",
+                "Microsoft.VSTS.Scheduling.RemainingWork",
+                "Microsoft.VSTS.Scheduling.CompletedWork",
+                "Microsoft.VSTS.Scheduling.OriginalEstimate",
             ])
             lines.append("Tasks:")
             for task in tasks:
                 task_fields = task.fields
+                children.append(json.loads(_serialize_work_item_payload(task)))
                 lines.append(
                     f"  - [{task_fields['System.State']}] {task_fields['System.Title']} "
                     f"(horas restantes: {task_fields.get('Microsoft.VSTS.Scheduling.RemainingWork', '?')})"
                 )
 
-    return "\n".join(lines)
+    return _serialize_work_item_payload(item, {
+        "story_id": story_id,
+        "description": fields.get("System.Description"),
+        "acceptance_criteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria"),
+        "priority": fields.get("Microsoft.VSTS.Common.Priority"),
+        "tags": fields.get("System.Tags"),
+        "child_work_items": children,
+        "message": "\n".join(lines),
+    })
 
 
 def _get_open_prs(email: str) -> str:
@@ -2974,6 +2990,9 @@ def _update_work_item_content(
     description: str | None = None,
     acceptance_criteria: str | None = None,
     comment: str | None = None,
+    assigned_to: str | None = None,
+    area_path: str | None = None,
+    status: str | None = None,
 ) -> str:
     normalized_comment = str(comment or "").strip()
     formatted_description = _format_azure_rich_text(description) if description is not None else None
@@ -2981,7 +3000,7 @@ def _update_work_item_content(
         _format_azure_rich_text(acceptance_criteria) if acceptance_criteria is not None else None
     )
 
-    if description is None and acceptance_criteria is None and not normalized_comment:
+    if all(value is None for value in (description, acceptance_criteria, assigned_to, area_path, status)) and not normalized_comment:
         raise ValueError(
             "Informe description, acceptance_criteria ou comment para atualizar o conteudo do work item."
         )
@@ -3003,6 +3022,20 @@ def _update_work_item_content(
     applied_fields: list[str] = []
     skipped_fields: list[str] = []
     requested_fields: list[str] = []
+
+    for name, reference, value in (
+        ("assigned_to", "System.AssignedTo", assigned_to),
+        ("area_path", "System.AreaPath", area_path),
+        ("status", "System.State", status),
+    ):
+        if value is not None:
+            if reference not in supported_fields:
+                raise ValueError(f"{reference} is not supported by {work_item_type}.")
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string.")
+            requested_fields.append(name)
+            document.append({"op": "add", "path": f"/fields/{reference}", "value": value})
+            applied_fields.append(name)
 
     if description is not None:
         requested_fields.append("description")
@@ -3032,6 +3065,7 @@ def _update_work_item_content(
         )
 
     updated_item = update_work_item(wit, document=document, id=work_item_id)
+    _confirm_work_item_status(updated_item, work_item_id, status)
     return _serialize_work_item_payload(
         updated_item,
         {
@@ -3052,6 +3086,7 @@ def _update_work_item_effort(
     completed_work_hours: float | None = None,
     original_estimate_hours: float | None = None,
     comment: str | None = None,
+    status: str | None = None,
 ) -> str:
     requested_effort = _build_effort_payload(
         story_points=story_points,
@@ -3116,6 +3151,16 @@ def _update_work_item_effort(
         skipped_fields,
     )
 
+    if status is not None:
+        if "System.State" not in supported_fields:
+            raise ValueError(f"System.State is not supported by {work_item_type}.")
+        if not isinstance(status, str) or not status.strip():
+            raise ValueError("status must be a non-empty string.")
+        if not applied_fields:
+            raise ValueError("No requested effort field is supported for the atomic update.")
+        document.append({"op": "add", "path": "/fields/System.State", "value": status})
+        applied_fields.append("status")
+
     if normalized_comment:
         document.append({"op": "add", "path": "/fields/System.History", "value": normalized_comment})
 
@@ -3126,6 +3171,7 @@ def _update_work_item_effort(
         )
 
     updated_item = update_work_item(wit, document=document, id=work_item_id)
+    _confirm_work_item_status(updated_item, work_item_id, status)
     return _serialize_work_item_payload(
         updated_item,
         {
@@ -3190,8 +3236,14 @@ def _update_story_status(story_id: int, status: str) -> str:
     wit = connection.clients.get_work_item_tracking_client()
 
     patch = [{"op": "add", "path": "/fields/System.State", "value": status}]
-    update_work_item(wit, document=patch, id=story_id)
-    return f"Historia KL-{story_id} atualizada para: {status}"
+    updated_item = update_work_item(wit, document=patch, id=story_id)
+    _confirm_work_item_status(updated_item, story_id, status)
+    return _serialize_work_item_payload(updated_item, {
+        "story_id": story_id,
+        "requested_status": status,
+        "status_confirmed": True,
+        "message": f"Historia KL-{story_id} atualizada para: {status}",
+    })
 
 
 def _add_story_comment(story_id: int, comment: str) -> str:

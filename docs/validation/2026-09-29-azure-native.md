@@ -1,5 +1,25 @@
 # Azure Native Validation - 2026-09-29
 
+## Review Fix Slice 1: Lifecycle Work Item Primitives
+
+- Added structured story and child snapshots with actual SDK revisions,
+  `current_status`, work item type, assignment, area and effort fields. The
+  original human-readable message remains available without modification.
+- Status writes now return the actual SDK work item and fail on a different
+  item, missing revision or a state different from the requested state.
+- Content updates accept assignment, area and state; effort updates accept
+  state alongside supported effort fields. Both use one JSON Patch including
+  the revision test. No workflow-state allowlist is introduced.
+- Atomic effort/state updates reject unsupported effort rather than closing
+  without recording the requested effort. Omitted remaining work is untouched.
+- Validation: lifecycle-focused regressions plus native service tests, using
+  simulated SDK clients only. Legacy parity compares unchanged human messages
+  and excludes additive snapshot fields; the new fields are tested explicitly.
+- Files: `domains/azure_devops/services.py`,
+  `tests/test_azure_native_services.py` and this scoped history artifact.
+- Rationale: lifecycle callers need confirmed machine-readable results and
+  atomic task start/closure primitives, not message parsing or two writes.
+
 ## Scope And Change History
 
 All changes stay inside `domains/azure_devops/**`, `tests/test_azure_native*.py`
