@@ -20,8 +20,6 @@
 - Rationale: lifecycle callers need confirmed machine-readable results and
   atomic task start/closure primitives, not message parsing or two writes.
 
-## Scope And Change History
-
 ## Review Fix Slice 2: Required Native Revisions
 
 - The native boundary requires a target revision for content, effort, status,
@@ -41,6 +39,184 @@
   `tests/test_azure_native_{services,entrypoint}.py` and this history artifact.
 - Multi-item branch/PR writes remain nontransactional. A race after preflight
   may leave earlier successful writes persisted; no automatic retry occurs.
+
+## Review Fix Slice 3: Graph-Owned Context And Final Evidence
+
+- Removed automatic technical-debt registration, context persistence and
+  post-create similarity queries. Creation performs only the requested Azure
+  creation and returns the actual work item. The old nullable result keys remain;
+  ownership is explicit via `context_persistence="moved_to_langgraph"` and
+  `similarity_analysis_owner="langgraph"`.
+- Similarity reads preserve matches, scores and associated repository items;
+  they may read existing context but never write it. `local_context_path` is
+  null and `context_persistence` indicates the LangGraph responsibility.
+- Removed the unused implicit context writer. The explicit
+  `save_technical_debt_preview_cache` capability remains unchanged.
+- PR preview also exposes the map at its root. Atomic effort/state writes reject
+  even partially unsupported requested effort; no field is silently skipped
+  when a state is part of that patch.
+- Added regressions for wrong returned item IDs, actual supported SDK fields,
+  nonconsecutive revisions and a race after branch association but before Git
+  creation. Network connections are blocked in the service fixtures.
+- Final validation on the existing FastMCP Python 3.10 environment:
+
+```text
+PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -p 'test_azure_native*.py' -q
+Ran 62 tests: OK
+Editor diagnostics: no errors in the five changed Python files.
+```
+
+- The full cross-domain suite was not rerun for this review-only scope. Its
+  earlier results below are historical, not a claim about the current dirty
+  gateway/server changes. No gateway, issuer, server or LangGraph file was edited.
+- Files: `domains/azure_devops/services.py`,
+  `tests/test_azure_native_services.py` and this scoped history artifact.
+
+## Exact Lifecycle Integration Contract
+
+Use the public native entrypoint, not the private service handlers:
+
+```python
+await invoke_azure_capability(name: str, arguments: dict[str, Any] | None = None)
+```
+
+It returns one envelope, already ready for gateway pass-through:
+
+```text
+{
+  "capability": name,
+  "domain": "azure_devops",
+  "operation": "read" | "preview" | "execute",
+  "data": <the result object below>
+}
+```
+
+Do not wrap that envelope again and do not parse `message` for lifecycle state.
+Revision arguments are consumed by the native boundary and are not passed to
+the private SDK service signatures. `expected_revision` is a positive integer;
+`expected_revisions` maps item IDs to positive integer revisions. Returned maps
+use string keys, suitable for JSON. A one-item map is also accepted for individual
+mutations. Conflicting guards for the same ID are rejected.
+
+### Common Work Item Result
+
+Every structured story/content/effort/status result contains these exact common
+keys (SDK fields absent from a work item remain null):
+
+```text
+{
+  "id": int, "revision": positive int,
+  "title": str | null, "work_item_type": str | null,
+  "state": str | null, "current_status": str | null,
+  "assigned_to": str, "area_path": str | null,
+  "iteration_path": str | null,
+  "story_points": number | null,
+  "remaining_work_hours": number | null,
+  "completed_work_hours": number | null,
+  "original_estimate_hours": number | null,
+  "url": str | null
+}
+```
+
+`state` and `current_status` are aliases of the actual `System.State`.
+`assigned_to` is the existing display-name serialization, not necessarily the
+email supplied in the request. Revisions are actual SDK revisions, not defaults.
+
+### Story Read And Status
+
+- `get_story_details` arguments: `{"story_id": int}`.
+  Data: common result plus `story_id`, `description` (raw HTML or null),
+  `acceptance_criteria` (raw HTML or null), `priority`, `tags`,
+  `child_work_items` (list of common results for every hierarchy-forward child)
+  and the unchanged human-readable `message`. Parent fields/revision/relations
+  come from one SDK snapshot. Child snapshots are separate Azure reads.
+- `update_story_status` arguments:
+  `{"story_id": int, "status": str, "expected_revision": int}`.
+  Data: common result plus `story_id`, `requested_status`,
+  `status_confirmed: true` and the unchanged human-readable `message`.
+  Success guarantees the returned item ID, advanced revision and exact requested
+  state. Any valid tenant state is accepted; LangGraph owns transition policy.
+
+### Atomic Start And Closure
+
+`update_work_item_content` arguments:
+
+```text
+{
+  "work_item_id": int, "expected_revision": int,
+  "description": str | null = null,
+  "acceptance_criteria": str | null = null,
+  "comment": str | null = null,
+  "assigned_to": str | null = null,
+  "area_path": str | null = null,
+  "status": str | null = null
+}
+```
+
+Data is the common result plus `requested_fields: list[str]`,
+`applied_fields: list[str]`, `skipped_fields: list[str]`, `comment_added: bool`,
+`description_format: "azure_simple_html" | null` and
+`acceptance_criteria_format: "azure_simple_html" | null`.
+Assignment, area and state use the actual supported `System.AssignedTo`,
+`System.AreaPath` and `System.State` fields. Unsupported fields fail before
+writing. All supplied fields and history share one revision-guarded patch.
+
+`update_work_item_effort` arguments:
+
+```text
+{
+  "work_item_id": int, "expected_revision": int,
+  "story_points": number | null = null,
+  "remaining_work_hours": number | null = null,
+  "completed_work_hours": number | null = null,
+  "original_estimate_hours": number | null = null,
+  "comment": str | null = null,
+  "status": str | null = null
+}
+```
+
+Data is the common result plus `requested_effort: dict[str, number]`,
+`applied_fields: list[str]`, `skipped_fields: list[str]`, `comment_added: bool`.
+At least one effort value is required. With `status`, every requested effort
+field must be supported. Closure is exactly one invocation with
+`completed_work_hours` and `status="Closed"`, producing one JSON Patch containing
+`test /rev`, effort fields, `System.State` and optional history. Do not call
+`update_story_status` as a second closure write. Omitted/null remaining work
+does not add, clear or force its field to zero. A supplied state is verified
+against the actual returned item for both content and effort updates.
+
+### Branch And PR Guards
+
+Branch preview arguments are `story_id: int`, `repository_name: str`,
+`source_branch: str`, optional `related_work_item_ids: list[int] | null = null`
+and `include_child_work_items: bool = true`. Preview data preserves the existing
+branch metadata, parent, work items and counts, adding
+`expected_revisions: dict[str, int]` for ALL resolved items, including linked ones.
+`associate_story_branch` takes those same arguments plus that required map.
+Its result preserves preview fields and adds `executed: true`,
+`association_result` and the final real `expected_revisions` map.
+
+PR preview/create arguments are the branch arguments plus required strings
+`what_was_changed`, `affected_processes`, `expected_impacts`, `important_points`,
+`mermaid_diagram`; optional `target_branch: str | null = null`,
+`title: str | null = null`, `tests_updated: bool = false`,
+`tests_unchanged: bool = false`, `new_library_name: str | null = null`,
+`env_changes: str | null = null`, `generated_migration_or_seed: str | null = null`,
+`new_queue_or_command: str | null = null`. Creation additionally requires the
+preview's `expected_revisions`. Preview data exposes the map both at root and
+in `branch_association_preview`. Creation preserves those fields and adds
+`executed`, `created`, `pull_request`, `branch_association_result`,
+`pull_request_association_result`, `message` and the final root revision map.
+Use `data.pull_request.web_url` for the direct PR link. Nested preview metadata
+is not the post-write concurrency token; use the final root map or a fresh read.
+
+Invalid/missing guards fail before SDK access with `ValueError`. Stale resolved
+snapshots, unsupported fields, mismatched status or SDK errors are surfaced as
+`AzureCapabilityError`; its `status_code` retains a real SDK HTTP code when
+provided, otherwise null. No success envelope or synthetic HTTP status/revision
+is generated on failure. No automatic retry or workflow transition occurs.
+
+## Scope And Change History
 
 All changes stay inside `domains/azure_devops/**`, `tests/test_azure_native*.py`
 and this artifact. The legacy `agent/**`, transport server, legacy gateway and
@@ -107,7 +283,7 @@ human supervision remain the responsibility of the LangGraph caller.
 - Existing bulk reads now use batches of 75 IDs, and WIQL email quotes are
   escaped. Repository cache keys cannot escape the tracking directory.
 
-### Validation Evidence
+### Initial Implementation Validation Evidence (Historical)
 
 ```text
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -p 'test_azure_native*.py' -v
@@ -170,9 +346,10 @@ ownership, not live Azure approval.
   or Git/WIT APIs. A later conflict may leave earlier successful associations
   persisted. The native services do not silently retry conflicts or roll back
   external mutations. Concurrent PR creation must be checked against Azure.
-- Technical-debt creation retains post-create cache/similarity side effects;
-  those can fail after the Azure item has been created. Local JSON caches retain
-  legacy last-writer-wins behavior rather than Azure-style revision guards.
+- Technical-debt creation no longer has post-create context/similarity side
+  effects, and similarity reads do not write context. LangGraph must explicitly
+  orchestrate those responsibilities. The explicit preview-cache capability
+  retains legacy last-writer-wins behavior rather than Azure revision guards.
 - The legacy PR formatter reports repository-template metadata but renders its
   fixed body sections rather than consuming arbitrary template content. This
   inherited limitation remains; previews and fixture parity do not certify

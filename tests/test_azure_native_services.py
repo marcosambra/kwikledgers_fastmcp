@@ -234,6 +234,7 @@ class NativeServiceTests(unittest.TestCase):
         self.assertTrue(data["can_open_pull_request"])
         self.assertNotIn("recommended_story_status_transition", data)
         self.assertEqual(data["template"]["source"], "default")
+        self.assertEqual(data["expected_revisions"], {"1": 7, "2": 7})
         self.wit.update_work_item.assert_not_called()
         self.git.create_pull_request.assert_not_called()
 
@@ -291,17 +292,27 @@ class NativeServiceTests(unittest.TestCase):
         self.assertIn("<ul><li>Check <code>value</code></li></ul>", fields["/fields/System.Description"])
         self.assertEqual(fields["/relations/-"]["rel"], "System.LinkTypes.Hierarchy-Reverse")
 
-    def test_create_technical_debt_preserves_local_context_side_effect(self) -> None:
-        data = self.invoke("create_work_item", work_item_type="debito tecnico", title="[KL STORE] Fix duplicated subscriptions")
+    def test_create_technical_debt_has_no_post_create_context_or_similarity_side_effect(self) -> None:
+        with patch.object(Path, "write_text", side_effect=AssertionError("Implicit context writes forbidden")):
+            data = self.invoke("create_work_item", work_item_type="debito tecnico", title="[KL STORE] Fix duplicated subscriptions")
         self.assertEqual(data["repository_name"], "kl_store")
-        self.assertTrue(Path(data["local_context_path"]).is_file())
-        self.assertTrue(data["similarity_analysis"]["duplicate_found"])
+        self.assertIsNone(data["local_context_path"])
+        self.assertIsNone(data["similarity_analysis"])
+        self.assertEqual(data["context_persistence"], "moved_to_langgraph")
+        self.assertEqual(data["similarity_analysis_owner"], "langgraph")
+        self.wit.create_work_item.assert_called_once()
+        self.wit.query_by_wiql.assert_not_called()
+        self.assertFalse((self.root / "debts").exists())
 
-    def test_find_similar_technical_debts_and_cache_payload(self) -> None:
-        data = self.invoke("find_similar_technical_debts", repository_name="kl_store", title="[KL STORE] Fix duplicated subscriptions", limit=1)
+    def test_find_similar_technical_debts_preserves_data_without_context_write(self) -> None:
+        with patch.object(Path, "write_text", side_effect=AssertionError("Implicit context writes forbidden")):
+            data = self.invoke("find_similar_technical_debts", repository_name="kl_store", title="[KL STORE] Fix duplicated subscriptions", limit=1)
         self.assertTrue(data["duplicate_found"])
         self.assertEqual(data["suggested_matches"][0]["id"], 3)
-        self.assertTrue(Path(data["local_context_path"]).is_file())
+        self.assertEqual(data["associated_repository_items"][0]["id"], 3)
+        self.assertIsNone(data["local_context_path"])
+        self.assertEqual(data["context_persistence"], "moved_to_langgraph")
+        self.assertFalse((self.root / "debts").exists())
         self.wit.update_work_item.assert_not_called()
 
     def test_save_technical_debt_preview_cache_merges_title_and_validates_children(self) -> None:
@@ -446,6 +457,52 @@ class NativeServiceTests(unittest.TestCase):
             with self.subTest(revision=returned_revision), self.assertRaises(AzureCapabilityError):
                 self.invoke("update_story_status", story_id=1, status="Closed", expected_revision=7)
 
+    def test_status_response_must_identify_the_real_target(self) -> None:
+        response = self.get_item(2)
+        response.rev = 8
+        self.wit.update_work_item.side_effect = None
+        self.wit.update_work_item.return_value = response
+        with self.assertRaisesRegex(AzureCapabilityError, "updated item"):
+            self.invoke("update_story_status", story_id=1, status="Closed", expected_revision=7)
+
+    def test_assignment_requires_real_supported_sdk_fields(self) -> None:
+        self.wit.get_work_item_type_fields_with_references.return_value = []
+        for field, value in (("assigned_to", "dev@example.test"), ("area_path", "Project\\Team"), ("status", "Active")):
+            with self.subTest(field=field), self.assertRaisesRegex(AzureCapabilityError, "not supported"):
+                self.invoke("update_work_item_content", work_item_id=1, **{field: value}, expected_revision=7)
+        self.wit.update_work_item.assert_not_called()
+
+    def test_atomic_closure_rejects_partially_supported_effort(self) -> None:
+        self.wit.get_work_item_type_fields_with_references.return_value = [
+            SimpleNamespace(reference_name="System.State"),
+            SimpleNamespace(reference_name="Microsoft.VSTS.Scheduling.StoryPoints"),
+        ]
+        with self.assertRaisesRegex(AzureCapabilityError, "may be skipped"):
+            self.invoke("update_work_item_effort", work_item_id=1, completed_work_hours=3, story_points=5, status="Closed", expected_revision=7)
+        self.wit.update_work_item.assert_not_called()
+
+    def test_pr_revision_advancement_uses_nonconsecutive_sdk_revisions(self) -> None:
+        def update_with_revision_jump(**kwargs: Any) -> Any:
+            updated = self.update_item(**kwargs)
+            self.items[updated.id].rev += 4
+            return self.get_item(updated.id)
+        self.wit.update_work_item.side_effect = update_with_revision_jump
+        result = self.invoke("create_story_pull_request", **self.pr_request(expected_revisions={"1": 7, "2": 7}))
+        self.assertEqual([call.kwargs["document"][0]["value"] for call in self.wit.update_work_item.call_args_list], [7, 7, 12, 12])
+        self.assertEqual(result["expected_revisions"], {"1": 17, "2": 17})
+
+    def test_pr_rechecks_revisions_after_branch_writes_before_git_creation(self) -> None:
+        def concurrent_change(**kwargs: Any) -> Any:
+            updated = self.update_item(**kwargs)
+            if kwargs["id"] == 2:
+                self.items[1].rev += 1
+            return updated
+        self.wit.update_work_item.side_effect = concurrent_change
+        with self.assertRaisesRegex(AzureCapabilityError, "revision conflict"):
+            self.invoke("create_story_pull_request", **self.pr_request(expected_revisions={"1": 7, "2": 7}))
+        self.assertEqual(self.wit.update_work_item.call_count, 2)
+        self.git.create_pull_request.assert_not_called()
+
     def test_revision_reader_returns_sdk_revision(self) -> None:
         self.assertEqual(work_item_revision(self.wit, 1), 7)
 
@@ -540,7 +597,7 @@ class NativeServiceTests(unittest.TestCase):
                     return {"message": value}
             if isinstance(value, dict):
                 return {key: normalize(child) if isinstance(child, (dict, list)) else child
-                        for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "recommended_story_status_transition"}}
+                        for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "context_persistence", "similarity_analysis_owner", "recommended_story_status_transition"}}
             if isinstance(value, list):
                 return [normalize(child) for child in value]
             return value
@@ -552,6 +609,9 @@ class NativeServiceTests(unittest.TestCase):
                     self.items = copy.deepcopy(seed_items)
                     self.prs.clear()
                     expected = reference[f"_{name}"](**arguments)
+                    if name == "find_similar_technical_debts":
+                        expected = json.loads(expected)
+                        expected["local_context_path"] = None
                     self.items = copy.deepcopy(seed_items)
                     self.prs.clear()
                     actual = self.invoke(name, **arguments)

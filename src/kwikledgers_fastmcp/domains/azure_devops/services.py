@@ -1012,6 +1012,7 @@ def _build_story_pull_request_preview_payload(
         "body_markdown": body_markdown,
         "template": template_context,
         "branch_association_preview": branch_preview,
+        "expected_revisions": dict(branch_preview["expected_revisions"]),
         "existing_active_pull_request": (
             _build_pull_request_summary(existing_active_pull_request, branch_preview["repository_name"])
             if existing_active_pull_request is not None
@@ -1048,18 +1049,6 @@ def _load_repo_technical_debt_context(repository_name: str) -> dict[str, Any]:
             "updated_at": None,
             "technical_debts": [],
         }
-
-
-def _save_repo_technical_debt_context(repository_name: str, technical_debts: list[dict[str, Any]]) -> str:
-    TECHNICAL_DEBT_CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-    context_payload = {
-        "repository_name": repository_name,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
-        "technical_debts": technical_debts,
-    }
-    context_path = _get_technical_debt_context_path(repository_name)
-    context_path.write_text(_format_json(context_payload) + "\n", encoding="utf-8")
-    return str(context_path)
 
 
 def _get_technical_debt_preview_cache_path(repository_name: str) -> Path:
@@ -1406,8 +1395,6 @@ def _build_technical_debt_similarity_analysis(
         }
         for item in associated_items
     ]
-    context_path = _save_repo_technical_debt_context(repository_name, serialized_associated_items)
-
     return {
         "repository_name": repository_name,
         "query_title": title,
@@ -1429,25 +1416,9 @@ def _build_technical_debt_similarity_analysis(
             for item in similar_items[:normalized_limit]
         ],
         "associated_repository_items": serialized_associated_items,
-        "local_context_path": context_path,
+        "local_context_path": None,
+        "context_persistence": "moved_to_langgraph",
     }
-
-
-def _register_technical_debt_in_repo_context(repository_name: str, created_item: Any) -> str:
-    current_context = _load_repo_technical_debt_context(repository_name)
-    current_items = current_context.get("technical_debts", []) or []
-    created_fields = getattr(created_item, "fields", {}) or {}
-    created_id = created_fields.get("System.Id", getattr(created_item, "id", None))
-    created_entry = {
-        "id": created_id,
-        "title": created_fields.get("System.Title"),
-        "state": created_fields.get("System.State"),
-        "iteration_path": created_fields.get("System.IterationPath"),
-        "url": _build_browser_work_item_url(created_id),
-    }
-    merged_items = [item for item in current_items if item.get("id") != created_id]
-    merged_items.insert(0, created_entry)
-    return _save_repo_technical_debt_context(repository_name, merged_items)
 
 
 def _find_similar_technical_debts(
@@ -2969,17 +2940,6 @@ def _create_work_item(
         type=resolved_work_item_type,
     )
 
-    local_context_path = None
-    similarity_analysis = None
-    if _is_technical_debt_type(resolved_work_item_type) and resolved_repository_name:
-        local_context_path = _register_technical_debt_in_repo_context(resolved_repository_name, created_item)
-        similarity_analysis = _build_technical_debt_similarity_analysis(
-            repository_name=resolved_repository_name,
-            title=normalized_title,
-            description=description,
-            limit=5,
-        )
-
     return _serialize_work_item_payload(
         created_item,
         {
@@ -2999,8 +2959,10 @@ def _create_work_item(
             ),
             "applied_fields": applied_fields,
             "skipped_fields": skipped_fields,
-            "local_context_path": local_context_path,
-            "similarity_analysis": similarity_analysis,
+            "local_context_path": None,
+            "similarity_analysis": None,
+            "context_persistence": "moved_to_langgraph",
+            "similarity_analysis_owner": "langgraph",
         },
     )
 
@@ -3176,8 +3138,8 @@ def _update_work_item_effort(
             raise ValueError(f"System.State is not supported by {work_item_type}.")
         if not isinstance(status, str) or not status.strip():
             raise ValueError("status must be a non-empty string.")
-        if not applied_fields:
-            raise ValueError("No requested effort field is supported for the atomic update.")
+        if not applied_fields or skipped_fields:
+            raise ValueError("No requested effort field may be skipped for the atomic update.")
         document.append({"op": "add", "path": "/fields/System.State", "value": status})
         applied_fields.append("status")
 
