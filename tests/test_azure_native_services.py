@@ -184,6 +184,25 @@ class NativeServiceTests(unittest.TestCase):
         self.assertIn("open_prs", data["counts"])
         self.assertEqual(len(data["items"]), 4)
 
+    def test_task_details_preserve_day_end_identity_and_activation(self) -> None:
+        self.items[2].fields["Microsoft.VSTS.Common.ActivatedDate"] = "2026-10-09T11:00:00Z"
+        self.items[2].relations = [SimpleNamespace(
+            rel="System.LinkTypes.Hierarchy-Reverse", url="https://example.test/wit/1",
+        )]
+        data = self.invoke("get_story_details", story_id=2)
+        self.assertEqual(data["assigned_to_email"], "dev@example.test")
+        self.assertEqual(data["activated_at"], "2026-10-09T11:00:00Z")
+        self.assertEqual(data["parent_id"], 1)
+        self.wit.update_work_item.assert_not_called()
+        self.wit.create_work_item.assert_not_called()
+
+    def test_task_details_without_identity_or_activation_do_not_invent_values(self) -> None:
+        self.items[2].fields.pop("System.AssignedTo")
+        data = self.invoke("get_story_details", story_id=2)
+        self.assertIsNone(data["assigned_to_email"])
+        self.assertIsNone(data["activated_at"])
+        self.assertIsNone(data["parent_id"])
+
     def test_get_my_blocked_items_payload(self) -> None:
         data = self.invoke("get_my_blocked_items")
         self.assertEqual(set(data), {"generated_at", "project", "user_email", "blocked_count", "blocked_items"})

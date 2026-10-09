@@ -2620,6 +2620,13 @@ def _get_story_details(story_id: int) -> str:
     item = wit.get_work_item(id=story_id, expand="Relations")
 
     fields = item.fields
+    assigned = fields.get("System.AssignedTo") or {}
+    assigned_email = assigned.get("uniqueName") if isinstance(assigned, dict) else getattr(assigned, "unique_name", None)
+    parent_ids = [
+        int(str(relation.url).rstrip("/").rsplit("/", 1)[-1])
+        for relation in getattr(item, "relations", None) or []
+        if getattr(relation, "rel", None) == "System.LinkTypes.Hierarchy-Reverse"
+    ]
     children: list[dict[str, Any]] = []
     lines = [
         f"=== KL-{story_id}: {fields['System.Title']} ===",
@@ -2662,6 +2669,9 @@ def _get_story_details(story_id: int) -> str:
 
     return _serialize_work_item_payload(item, {
         "story_id": story_id,
+        "assigned_to_email": assigned_email,
+        "activated_at": str(fields.get("Microsoft.VSTS.Common.ActivatedDate") or "") or None,
+        "parent_id": parent_ids[0] if len(parent_ids) == 1 else None,
         "description": fields.get("System.Description"),
         "acceptance_criteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria"),
         "priority": fields.get("Microsoft.VSTS.Common.Priority"),
