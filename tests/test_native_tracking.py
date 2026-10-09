@@ -12,10 +12,10 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from kwikledgers_fastmcp.domains.local_tracking.services import (
-    FastMcpTrackingSyncAdapter, TrackingService, invoke_tracking_capability,
+    FastMcpTrackingSyncAdapter, TrackingService, invoke_tracking_capability, resolve_workspace_root,
 )
 
 
@@ -29,6 +29,107 @@ class NativeTrackingTests(unittest.TestCase):
         self.clock = clock.start()
         self.addCleanup(clock.stop)
         self.clock.utcnow.return_value = datetime(2026, 9, 29, 12, 30)
+
+    def test_root_discovery_without_legacy_agent(self) -> None:
+        (self.root / ".vscode").mkdir()
+        (self.root / "AGENTS.md").write_text("# Native workspace\n", encoding="utf-8")
+        service_path = self.root / "kwikledgers_fastmcp/src/domains/local_tracking/services.py"
+        with patch.dict(os.environ), patch(
+            "kwikledgers_fastmcp.domains.local_tracking.services.__file__", service_path,
+        ):
+            os.environ.pop("KWIKLEDGERS_ROOT_DIR", None)
+            self.assertEqual(resolve_workspace_root(), self.root.resolve())
+            (self.root / "AGENTS.md").unlink()
+            (self.root / "kwikledgers_fastmcp").mkdir()
+            (self.root / "kwikledgers_langgraph").mkdir()
+            self.assertEqual(resolve_workspace_root(), self.root.resolve())
+            explicit = self.root / "explicit"
+            os.environ["KWIKLEDGERS_ROOT_DIR"] = str(explicit)
+            self.assertEqual(resolve_workspace_root(), explicit.resolve())
+            os.environ.pop("KWIKLEDGERS_ROOT_DIR")
+            (self.root / "kwikledgers_langgraph").rmdir()
+            with self.assertRaisesRegex(RuntimeError, "KWIKLEDGERS_ROOT_DIR"):
+                resolve_workspace_root()
+        self.assertFalse((self.root / "agent").exists())
+
+    def test_snapshot_replacements_are_atomic_per_file(self) -> None:
+        self.service.update_task_control('{"items": [{"id": 1, "state": "QA"}]}')
+        json_path = self.service.task_control_dir / "current-sprint.json"
+        md_path = self.service.task_control_dir / "current-sprint.md"
+        previous = {path: path.read_bytes() for path in (json_path, md_path)}
+        replace = os.replace
+
+        def inspect_replacement(source: Path, destination: Path) -> None:
+            self.assertEqual(source.parent, destination.parent)
+            self.assertEqual(destination.read_bytes(), previous[destination])
+            content = source.read_text(encoding="utf-8")
+            if destination == json_path:
+                self.assertEqual(json.loads(content)["items"][0]["state"], "Active")
+            else:
+                self.assertIn("QA -> Active", content)
+            replace(source, destination)
+
+        with patch(
+            "kwikledgers_fastmcp.domains.local_tracking.services.os.replace",
+            side_effect=inspect_replacement,
+        ) as replacements, patch(
+            "kwikledgers_fastmcp.domains.local_tracking.services.os.fsync", wraps=os.fsync,
+        ) as fsync:
+            self.service.update_task_control('{"items": [{"id": 1, "state": "Active"}]}')
+        self.assertEqual(replacements.call_count, 2)
+        self.assertEqual(fsync.call_count, 2)
+        self.assertEqual(list(self.service.task_control_dir.glob("*.tmp")), [])
+
+    def test_failed_atomic_replacement_preserves_snapshot_and_cleans_tempfile(self) -> None:
+        self.service.update_task_control("{}")
+        paths = [self.service.task_control_dir / name for name in ("current-sprint.json", "current-sprint.md")]
+        previous = [path.read_bytes() for path in paths]
+        with patch(
+            "kwikledgers_fastmcp.domains.local_tracking.services.os.replace",
+            side_effect=OSError("replacement failed"),
+        ), self.assertRaisesRegex(OSError, "replacement failed"):
+            self.service.update_task_control('{"items": []}')
+        self.assertEqual([path.read_bytes() for path in paths], previous)
+        self.assertEqual(list(self.service.task_control_dir.glob("*.tmp")), [])
+
+    def test_invoke_locks_reads_and_releases_after_handler_error(self) -> None:
+        with patch.object(self.service, "read_tracking_snapshot", side_effect=ValueError("handler failed")):
+            with self.assertRaisesRegex(ValueError, "handler failed"):
+                self.service.invoke("read_tracking_snapshot", {})
+        lock_path = self.root / "AI_Tracking/Audit/tracking.lock"
+        self.assertTrue(lock_path.is_file())
+        if os.name != "nt":
+            import fcntl
+
+            with lock_path.open("a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    pass
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        self.assertIsInstance(self.service.invoke("read_tracking_snapshot", {}), str)
+        self.assertTrue(lock_path.is_file())
+        self.assertEqual(self.service.invoke("missing", {}), "Ferramenta desconhecida: missing")
+
+    def test_windows_lock_failure_does_not_invoke_handler(self) -> None:
+        msvcrt = Mock(LK_LOCK=1, LK_UNLCK=0)
+        msvcrt.locking.side_effect = OSError("lock unavailable")
+        with patch.dict(sys.modules, {"msvcrt": msvcrt}), patch(
+            "kwikledgers_fastmcp.domains.local_tracking.services.os.name", "nt",
+        ), patch.object(self.service, "read_tracking_snapshot") as handler:
+            with self.assertRaisesRegex(RuntimeError, "Unable to acquire tracking filesystem lock"):
+                self.service.invoke("read_tracking_snapshot", {})
+        handler.assert_not_called()
+        self.assertEqual(msvcrt.locking.call_count, 1)
+
+    def test_windows_lock_releases_after_handler_error(self) -> None:
+        msvcrt = Mock(LK_LOCK=1, LK_UNLCK=0)
+        with patch.dict(sys.modules, {"msvcrt": msvcrt}), patch(
+            "kwikledgers_fastmcp.domains.local_tracking.services.os.name", "nt",
+        ), patch.object(self.service, "read_tracking_snapshot", side_effect=ValueError("handler failed")):
+            with self.assertRaisesRegex(ValueError, "handler failed"):
+                self.service.invoke("read_tracking_snapshot", {})
+        self.assertEqual([call.args[1:] for call in msvcrt.locking.call_args_list], [(1, 1), (0, 1)])
 
     def test_snapshot_exact_paths_and_flags(self) -> None:
         snapshot = json.loads(self.service.read_tracking_snapshot())
@@ -127,6 +228,48 @@ class NativeTrackingTests(unittest.TestCase):
         self.assertEqual(content.count("# Daily Action Log"), 1)
         for index in range(20):
             self.assertEqual(content.count(f" - Entry-{index}\n"), 1)
+
+    def test_multiprocess_dispatch_preserves_twenty_entries(self) -> None:
+        source_root = Path(__file__).resolve().parents[1] / "src"
+        code = (
+            "import sys\n"
+            "from datetime import datetime\n"
+            "from unittest.mock import patch\n"
+            "from kwikledgers_fastmcp.domains.local_tracking.services import TrackingService\n"
+            "service = TrackingService()\n"
+            "assert sys.stdin.readline() == 'start\\n'\n"
+            "with patch('kwikledgers_fastmcp.domains.local_tracking.services.datetime') as clock:\n"
+            "    clock.utcnow.return_value = datetime(2026, 9, 29, 12, 30)\n"
+            "    print(service.invoke('append_daily_action_log', "
+            "{'title': 'Process-' + sys.argv[1], 'details': 'Test'}))\n"
+        )
+        processes = []
+        try:
+            for index in range(20):
+                processes.append(subprocess.Popen(
+                    [sys.executable, "-c", code, str(index)], cwd=self.root,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    env={**os.environ, "PYTHONPATH": str(source_root), "KWIKLEDGERS_ROOT_DIR": str(self.root)},
+                ))
+            for process in processes:
+                self.assertIsNotNone(process.stdin)
+                process.stdin.write("start\n")
+                process.stdin.flush()
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=30)
+                self.assertEqual(process.returncode, 0, stderr)
+                self.assertIn("Log atualizado:", stdout)
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                process.communicate()
+        content = (self.service.daily_log_dir / "2026-09-29.md").read_text(encoding="utf-8")
+        self.assertEqual(content.count("# Daily Action Log"), 1)
+        self.assertEqual(content.count("### "), 20)
+        for index in range(20):
+            self.assertEqual(content.count(f" - Process-{index}\n"), 1)
+        self.assertTrue((self.root / "AI_Tracking/Audit/tracking.lock").is_file())
 
     def test_native_imports_are_transport_and_legacy_free(self) -> None:
         source_root = Path(__file__).resolve().parents[1] / "src"

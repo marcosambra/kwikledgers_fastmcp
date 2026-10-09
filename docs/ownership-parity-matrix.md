@@ -37,7 +37,13 @@
 |---|---|---|
 | FastMCP transport | Ativo | Registry FastMCP registra as 30 capabilities atômicas. |
 | FastMCP execute authorization | Ativo | Tools `execute` exigem capability HMAC emitida pelo LangGraph com ação, digest, run, request e expiração. |
-| FastMCP domain implementation | Compatibilidade | Gateway delega temporariamente aos dispatchers legados. |
+| FastMCP domain implementation | Ativo | As 30 capabilities usam serviços nativos de Azure DevOps, tracking local e Windows. |
 | LangGraph processos | Ativo | Mantém guardrails, replay, status flow e workflows existentes. |
-| Migração de serviços puros | Pendente | Próximo passo é remover import direto dos módulos legados por domínio. |
-| Sunset do legado | Pendente | Só após paridade de contratos, shadow mode e rollout por capability. |
+| Migração de serviços puros | Concluída | A configuração usa arquivo explícito ou `.env` do workspace; não consulta `agent/mcp_servers`. |
+| Sunset do legado | Em observação | O backend padrão é FastMCP; o rollback legado é explícito e temporário. |
+
+## Evidência do Slice de Identidade Ativa (2026-09-25)
+
+- `get_active_user` preserva o envelope FastMCP e a resposta textual do legado; testes cobrem identidade configurada, fallback do `.env`, Git e e-mail ausente, sem chamada ao `_dispatch`.
+- Validação: `poetry run python -m unittest discover -s tests -p 'test_*.py'` no diretório `kwikledgers_fastmcp` (16 testes, OK).
+- Compatibilidade: as demais capabilities seguem no gateway legado. Nenhum fluxo mutável, política LangGraph ou autorização foi alterado.

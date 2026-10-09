@@ -6,18 +6,25 @@ import json
 import os
 import re
 import subprocess
+import traceback
 import unittest
 from datetime import datetime
 from unittest.mock import patch
 
 from kwikledgers_fastmcp.domains.windows.services import (
-    FastMcpNotificationAdapter, WindowsService, _decode_powershell_output,
+    FastMcpNotificationAdapter, WindowsCapabilityError, WindowsService, _decode_powershell_output,
     _get_timeout_seconds, invoke_windows_capability,
 )
 
 
 class NativeWindowsTests(unittest.TestCase):
     def setUp(self) -> None:
+        environment = patch.dict(os.environ, {
+            "KWIKLEDGERS_WINDOWS_OUTLOOK_TIMEOUT_SECONDS": "90",
+            "KWIKLEDGERS_WINDOWS_NOTIFICATION_TIMEOUT_SECONDS": "20",
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
         self.service = WindowsService(is_wsl=True)
         runner = patch("kwikledgers_fastmcp.domains.windows.services.subprocess.run")
         self.runner = runner.start()
@@ -142,6 +149,14 @@ class NativeWindowsTests(unittest.TestCase):
             with patch.dict(os.environ, {"TIMEOUT_TEST": raw}):
                 self.assertEqual(_get_timeout_seconds("TIMEOUT_TEST", 90), 90)
 
+    def test_windows_timeouts_are_bounded_and_invalid_values_use_defaults(self) -> None:
+        for default in (20, 90):
+            for raw, expected in (("1", 1), (" 120 ", 120), ("301", 300), ("999999", 300),
+                                  ("nan", default), ("inf", default), ("1.5", default),
+                                  ("secret", default), ("9" * 5000, default)):
+                with self.subTest(default=default, raw=raw), patch.dict(os.environ, {"TIMEOUT_TEST": raw}):
+                    self.assertEqual(_get_timeout_seconds("TIMEOUT_TEST", default), expected)
+
     def test_platform_missing_executable_and_native_command(self) -> None:
         self.assertIn("requer Windows ou WSL", WindowsService(is_wsl=False, platform_name="posix").get_upcoming_deadlines())
         self.runner.assert_not_called()
@@ -167,12 +182,71 @@ class NativeWindowsTests(unittest.TestCase):
                 ("schedule_reminder", {"title": "T", "remind_at": "2026-09-29T10:00:00", "message": "M"}),
             ):
                 self.assertIsInstance(asyncio.run(invoke_windows_capability(name, arguments)), str)
-            self.assertEqual(asyncio.run(invoke_windows_capability("missing", {})), "Ferramenta desconhecida: missing")
             with patch.object(WindowsService, "send_notification", return_value="OK") as notifier:
                 FastMcpNotificationAdapter().send_daily_summary_notification({"counts": {"blocked_items": 1}})
                 self.assertEqual(notifier.call_args.args[2], "high")
                 FastMcpNotificationAdapter().send_daily_summary_notification({})
                 self.assertEqual(notifier.call_args.args[2], "normal")
+
+    def test_unknown_capability_is_value_error_without_dispatch_or_secret(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            asyncio.run(invoke_windows_capability("secret", {}))
+        self.assertEqual(str(raised.exception), "Unknown Windows capability.")
+        self.runner.assert_not_called()
+
+    def test_boundary_rejects_legacy_error_strings_for_every_capability(self) -> None:
+        for name in ("send_notification", "create_calendar_event", "schedule_reminder", "get_upcoming_deadlines"):
+            with self.subTest(name=name), patch.object(WindowsService, name, return_value="Erro ao executar: secret"), \
+                 self.assertRaises(WindowsCapabilityError) as raised:
+                asyncio.run(invoke_windows_capability(name, {}))
+            self.assertEqual(raised.exception.execution_outcome_unknown, name != "get_upcoming_deadlines")
+            self.assertNotIn("secret", str(raised.exception))
+        self.runner.assert_not_called()
+
+    def test_boundary_sanitizes_unexpected_exceptions_and_validation(self) -> None:
+        for name in ("create_calendar_event", "get_upcoming_deadlines"):
+            for error in (RuntimeError("secret"), ValueError("secret"), TypeError("secret")):
+                with self.subTest(name=name, error=type(error)), patch.object(WindowsService, name, side_effect=error):
+                    try:
+                        asyncio.run(invoke_windows_capability(name, {}))
+                    except WindowsCapabilityError as failure:
+                        self.assertEqual(failure.execution_outcome_unknown,
+                                         isinstance(error, RuntimeError) and name != "get_upcoming_deadlines")
+                        self.assertNotIn("secret", "".join(traceback.format_exception(failure)))
+                    else:
+                        self.fail("Windows failure was returned as success")
+        self.runner.assert_not_called()
+
+    def test_boundary_validation_never_launches_or_leaks_arguments(self) -> None:
+        for name, arguments in (
+            ("schedule_reminder", {"title": "T", "remind_at": "secret", "message": "M"}),
+            ("create_calendar_event", {"title": "T", "start": "S", "end": "E", "reminder_minutes": "secret"}),
+            ("send_notification", {"title": "T", "message": "M", "urgency": "secret"}),
+            ("get_upcoming_deadlines", {"secret": "secret"}),
+        ):
+            with self.subTest(name=name):
+                try:
+                    asyncio.run(invoke_windows_capability(name, arguments))
+                except WindowsCapabilityError as failure:
+                    self.assertFalse(failure.execution_outcome_unknown)
+                    self.assertNotIn("secret", "".join(traceback.format_exception(failure)))
+                else:
+                    self.fail("Invalid arguments were returned as success")
+        self.runner.assert_not_called()
+
+    def test_boundary_rejects_powershell_timeout_and_failure_without_raw_output(self) -> None:
+        for result in (subprocess.CompletedProcess([], 1, b"", b"secret"),
+                       subprocess.TimeoutExpired(["secret"], 90, output=b"secret")):
+            self.runner.side_effect = result if isinstance(result, Exception) else None
+            if not isinstance(result, Exception):
+                self.runner.return_value = result
+            with patch("kwikledgers_fastmcp.domains.windows.services._is_wsl", return_value=True), \
+                 self.assertRaises(WindowsCapabilityError) as raised:
+                asyncio.run(invoke_windows_capability("create_calendar_event", {
+                    "title": "secret", "start": "2026-10-01T10:00:00", "end": "2026-10-01T11:00:00",
+                }))
+            self.assertTrue(raised.exception.execution_outcome_unknown)
+            self.assertNotIn("secret", str(raised.exception))
 
 
 if __name__ == "__main__":

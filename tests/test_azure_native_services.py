@@ -247,15 +247,16 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(second["association_result"]["already_linked_count"], 2)
         self.assertEqual(self.wit.update_work_item.call_count, 2)
 
-    def test_create_story_pull_request_reuses_pr_and_preserves_work_item_links(self) -> None:
+    def test_create_story_pull_request_rejects_existing_pr_before_writes(self) -> None:
         first = self.invoke("create_story_pull_request", **self.pr_request())
         self.assertTrue(first["created"])
         self.assertIn("/pullrequest/99", first["pull_request"]["web_url"])
         self.assertEqual(first["pull_request_association_result"]["associated_count"], 2)
         self.assertEqual(self.items[1].fields["System.State"], "Active")
-        second = self.invoke("create_story_pull_request", **self.pr_request())
-        self.assertFalse(second["created"])
-        self.assertEqual(second["pull_request_association_result"]["already_linked_count"], 2)
+        writes = self.wit.update_work_item.call_count
+        with self.assertRaisesRegex(AzureCapabilityError, "existing_active_pull_request"):
+            self.invoke("create_story_pull_request", **self.pr_request())
+        self.assertEqual(self.wit.update_work_item.call_count, writes)
         self.git.create_pull_request.assert_called_once()
 
     def test_pr_revision_map_advances_only_after_successful_writes(self) -> None:

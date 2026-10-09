@@ -8,29 +8,15 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from .configuration import load_configuration
+
 
 def read_active_user() -> str:
     env_file = os.environ.get("KWIKLEDGERS_ENV_FILE") or os.environ.get("MCP_ENV_FILE")
     if env_file and Path(env_file).expanduser().is_file():
         load_dotenv(Path(env_file).expanduser())
     else:
-        mcp_root = os.environ.get("KWIKLEDGERS_MCP_SERVERS_PATH")
-        legacy_root = os.environ.get("KWIKLEDGERS_LEGACY_ROOT")
-        if mcp_root:
-            mcp_path = Path(mcp_root).expanduser()
-        elif legacy_root:
-            mcp_path = Path(legacy_root).expanduser() / "agent" / "mcp_servers"
-        else:
-            mcp_path = next(
-                (root / "agent" / "mcp_servers" for start in (Path.cwd(), Path(__file__))
-                 for root in (start, *start.parents) if (root / "agent" / "mcp_servers").is_dir()),
-                None,
-            )
-        if mcp_path:
-            for candidate in (mcp_path / "azure_devops" / ".env", mcp_path / ".env", mcp_path.parent / ".env"):
-                if candidate.is_file():
-                    load_dotenv(candidate)
-                    break
+        load_configuration()
 
     email = os.environ.get("AZURE_USER_EMAIL", "").strip()
     if not email:

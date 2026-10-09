@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from threading import RLock
-from typing import Any
+from typing import Any, Iterator
 
 from .artifacts import build_control_markdown, build_default_log_details
 
@@ -18,7 +20,11 @@ def resolve_workspace_root() -> Path:
     if explicit_root:
         return Path(explicit_root).expanduser().resolve()
     for parent in Path(__file__).resolve().parents:
-        if (parent / "agent").is_dir() and (parent / ".vscode").is_dir():
+        native_workspace = (
+            (parent / "kwikledgers_fastmcp").is_dir()
+            and (parent / "kwikledgers_langgraph").is_dir()
+        )
+        if (parent / ".vscode").is_dir() and ((parent / "AGENTS.md").is_file() or native_workspace):
             return parent
     raise RuntimeError("Defina KWIKLEDGERS_ROOT_DIR para o workspace de tracking.")
 
@@ -36,6 +42,53 @@ class TrackingService:
     def _ensure_directories(self) -> None:
         for directory in (self.task_control_dir, self.daily_log_dir, self.metrics_dir):
             directory.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def _filesystem_lock(self) -> Iterator[None]:
+        audit_dir = self.tracking_dir / "Audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        with (audit_dir / "tracking.lock").open("a+b", buffering=0) as handle:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                except OSError as error:
+                    raise RuntimeError("Unable to acquire tracking filesystem lock") from error
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _atomic_write(path: Path, content: str) -> None:
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=path.parent,
+                prefix=f".{path.name}.", suffix=".tmp", delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     @staticmethod
     def _today_stamp() -> str:
@@ -71,8 +124,8 @@ class TrackingService:
                     "previous_state": previous_state, "current_state": current_state,
                 })
         payload["returned_items"] = returned_items
-        json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
-        md_path.write_text(build_control_markdown(payload, self._today_stamp()), encoding="utf-8")
+        self._atomic_write(json_path, json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
+        self._atomic_write(md_path, build_control_markdown(payload, self._today_stamp()))
         return (
             f"Arquivos atualizados: {json_path} e {md_path}. "
             f"Itens devolvidos detectados: {len(returned_items)}"
@@ -171,7 +224,7 @@ class TrackingService:
         }
         if name not in handlers:
             return f"Ferramenta desconhecida: {name}"
-        with _TRACKING_LOCK:
+        with _TRACKING_LOCK, self._filesystem_lock():
             return handlers[name](**arguments)
 
 

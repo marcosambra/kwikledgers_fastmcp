@@ -5,8 +5,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from kwikledgers_fastmcp.domains.azure_devops import invoke_azure_capability
+from kwikledgers_fastmcp.domains.local_tracking.services import invoke_tracking_capability
+from kwikledgers_fastmcp.domains.windows.services import invoke_windows_capability
 from kwikledgers_fastmcp.shared.execution_capability import verify_execution_capability
-from kwikledgers_fastmcp.shared.legacy_runtime import ensure_legacy_import_path
 
 
 FORBIDDEN_WORKFLOW_FIELDS = {
@@ -70,19 +72,6 @@ WINDOWS_CAPABILITIES = (
 CAPABILITY_CATALOG = AZURE_CAPABILITIES + TRACKING_CAPABILITIES + WINDOWS_CAPABILITIES
 
 
-def _server_module_for(domain: str) -> Any:
-    ensure_legacy_import_path()
-    if domain == "azure_devops":
-        from azure_devops import server as legacy_server
-    elif domain == "local_tracking":
-        from local_tracking import server as legacy_server
-    elif domain == "windows":
-        from windows_calendar import server as legacy_server
-    else:
-        raise ValueError(f"Domínio FastMCP desconhecido: {domain}")
-    return legacy_server
-
-
 def _validate_atomic_request(arguments: dict[str, Any]) -> None:
     forbidden = sorted(set(arguments).intersection(FORBIDDEN_WORKFLOW_FIELDS))
     if forbidden:
@@ -105,8 +94,22 @@ async def invoke_legacy_capability(
             capability_name=definition.name,
             arguments=normalized_arguments,
         )
-    legacy_server = _server_module_for(definition.domain)
-    result = await legacy_server._dispatch(definition.name, normalized_arguments)
+    handlers = {
+        "azure_devops": invoke_azure_capability,
+        "local_tracking": invoke_tracking_capability,
+        "windows": invoke_windows_capability,
+    }
+    if definition.domain not in handlers:
+        raise ValueError(f"Domínio FastMCP desconhecido: {definition.domain}")
+    result = await handlers[definition.domain](definition.name, normalized_arguments)
+    if isinstance(result, dict) and {
+        "capability", "domain", "operation", "data",
+    }.issubset(result):
+        if result["capability"] != definition.name or result["domain"] != definition.domain:
+            raise ValueError("A capability nativa retornou um envelope inconsistente.")
+        if not isinstance(result["data"], dict):
+            raise ValueError("A capability nativa retornou dados inválidos.")
+        return result
     if isinstance(result, str):
         try:
             data: Any = json.loads(result)

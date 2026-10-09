@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 
 def workspace_root() -> Path:
-    explicit = os.environ.get("KWIKLEDGERS_ROOT_DIR") or os.environ.get("KWIKLEDGERS_LEGACY_ROOT")
+    explicit = os.environ.get("KWIKLEDGERS_ROOT_DIR")
     if explicit:
         return Path(explicit).expanduser().resolve()
     for start in (Path.cwd(), Path(__file__).resolve()):
@@ -20,9 +20,7 @@ def workspace_root() -> Path:
 
 def load_configuration() -> Path | None:
     explicit = os.environ.get("KWIKLEDGERS_ENV_FILE") or os.environ.get("MCP_ENV_FILE")
-    mcp_path = Path(os.environ.get("KWIKLEDGERS_MCP_SERVERS_PATH", str(workspace_root() / "agent" / "mcp_servers"))).expanduser()
     candidates = ([Path(explicit).expanduser()] if explicit else []) + [
-        mcp_path / "azure_devops" / ".env", mcp_path / ".env", mcp_path.parent / ".env",
         workspace_root() / ".env",
     ]
     loaded = next((candidate for candidate in candidates if candidate.is_file()), None)

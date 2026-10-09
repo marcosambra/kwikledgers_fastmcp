@@ -158,8 +158,10 @@ See `ROADMAP.md` in this directory for the recommended migration order, slices, 
 - `pyproject.toml` defines the standalone package boundary.
 - `src/kwikledgers_fastmcp/server.py` now exposes a real FastMCP tool registry for the Azure DevOps, local tracking, and Windows capability catalog.
 - `src/kwikledgers_fastmcp/shared/contracts.py` starts the shared contract layer.
-- `tests/test_server.py` validates the paused metadata plus the frozen compatibility bridges already present in this package.
+- `tests/test_server.py` validates o registry, o envelope de capabilities e o dispatcher nativo.
 
-All registered capabilities currently delegate to the legacy domain dispatchers through a compatibility gateway. This keeps payload behavior stable while service extraction and LangGraph backend switching are completed in subsequent slices.
+As 30 capabilities registradas são atendidas por serviços FastMCP nativos. O
+LangGraph seleciona `fastmcp` por padrão; `legacy` continua disponível somente
+como rollback explícito durante a janela operacional de observação.
 
 The ownership and parity map is maintained in [docs/ownership-parity-matrix.md](docs/ownership-parity-matrix.md).

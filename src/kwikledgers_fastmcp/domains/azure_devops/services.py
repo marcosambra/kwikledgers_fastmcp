@@ -7,6 +7,7 @@ import re
 import unicodedata
 from difflib import SequenceMatcher
 from html import escape, unescape
+from html.parser import HTMLParser
 from base64 import b64encode
 from datetime import datetime
 from pathlib import Path
@@ -336,7 +337,105 @@ def _render_lines_as_azure_html(lines: list[str]) -> str:
     return "".join(html_parts)
 
 
+class _GeneratedAzureHTMLValidator(HTMLParser):
+    def __init__(self, value: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self.source_lines = value.splitlines(keepends=True)
+        self.stack: list[str] = []
+        self.valid = True
+        self.has_tag = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        inline_tags = {"strong", "em", "code", "br"}
+        block_tags = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "pre"}
+        if tag not in inline_tags | block_tags | {"li"}:
+            self.valid = False
+            return
+        raw_tag = self.get_starttag_text() or ""
+        if attrs:
+            if tag != "code" or len(attrs) != 1 or attrs[0][0] != "class":
+                self.valid = False
+                return
+            if re.fullmatch(r"language-[A-Za-z0-9_+\-]+", attrs[0][1] or "") is None:
+                self.valid = False
+                return
+            tag_pattern = r"<code\s+class=(?:\"language-[A-Za-z0-9_+\-]+\"|'language-[A-Za-z0-9_+\-]+')\s*>"
+        else:
+            tag_pattern = rf"<{tag}\s*{'/?' if tag == 'br' else ''}>"
+        if re.fullmatch(tag_pattern, raw_tag) is None:
+            self.valid = False
+            return
+        parent = self.stack[-1] if self.stack else None
+        if parent is None:
+            allowed = block_tags
+        elif parent in {"ul", "ol"}:
+            allowed = {"li"}
+        elif parent == "li":
+            allowed = inline_tags | block_tags
+        elif parent == "pre":
+            allowed = {"code"}
+        elif parent == "code":
+            allowed = set()
+        else:
+            allowed = inline_tags - ({"strong", "em"} & set(self.stack))
+        if tag not in allowed:
+            self.valid = False
+            return
+        self.has_tag = True
+        if tag != "br":
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "br":
+            self.valid = False
+            return
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        line, column = self.getpos()
+        remaining = "".join(self.source_lines[line - 1:])[column:]
+        if re.match(rf"</{re.escape(tag)}\s*>", remaining) is None:
+            self.valid = False
+        if not self.stack or self.stack[-1] != tag:
+            self.valid = False
+            return
+        self.stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if "<" in data or ">" in data:
+            self.valid = False
+        if data.strip() and (not self.stack or self.stack[-1] in {"ul", "ol", "pre"}):
+            self.valid = False
+
+    def handle_entityref(self, name: str) -> None:
+        self.handle_data("&" + name + ";")
+
+    def handle_charref(self, name: str) -> None:
+        self.handle_data("&#" + name + ";")
+
+    def handle_comment(self, data: str) -> None:
+        self.valid = False
+
+    def handle_decl(self, decl: str) -> None:
+        self.valid = False
+
+    def unknown_decl(self, data: str) -> None:
+        self.valid = False
+
+    def handle_pi(self, data: str) -> None:
+        self.valid = False
+
+
 def _format_azure_rich_text(value: str | None) -> str | None:
+    if value:
+        validator = _GeneratedAzureHTMLValidator(value)
+        try:
+            validator.feed(value)
+            validator.close()
+        except (ValueError, AssertionError):
+            validator.valid = False
+        if validator.valid and validator.has_tag and not validator.stack:
+            return value
     lines = _normalize_markdown_lines(value)
     if not lines:
         return None
@@ -2754,6 +2853,9 @@ def _create_story_pull_request(
         mermaid_diagram=mermaid_diagram,
     )
 
+    if preview_payload.get("existing_active_pull_request") is not None:
+        raise ValueError("existing_active_pull_request: a nova PR aprovada nao pode reutilizar uma PR ativa existente.")
+
     _check_association_revisions(wit, preview_payload["branch_association_preview"]["work_items"])
     branch_association_result = _associate_artifact_to_work_items(
         wit,
@@ -2762,30 +2864,26 @@ def _create_story_pull_request(
         artifact_name="Branch",
     )
 
-    pull_request_summary = preview_payload.get("existing_active_pull_request")
-    created = False
-    if pull_request_summary is None:
-        _check_association_revisions(wit, preview_payload["branch_association_preview"]["work_items"])
-        created_pull_request = git.create_pull_request(
-            GitPullRequest(
-                source_ref_name=preview_payload["source_ref_name"],
-                target_ref_name=preview_payload["target_ref_name"],
-                title=preview_payload["title"],
-                description=preview_payload["body_markdown"],
-                is_draft=True,
-            ),
-            repository_id=preview_payload["repository_id"],
-            project=get_project(),
-            supports_iterations=True,
-        )
-        pull_request_summary = _build_pull_request_summary(
-            created_pull_request,
-            preview_payload["repository_name"],
-        )
-        created = True
+    _check_association_revisions(wit, preview_payload["branch_association_preview"]["work_items"])
+    created_pull_request = git.create_pull_request(
+        GitPullRequest(
+            source_ref_name=preview_payload["source_ref_name"],
+            target_ref_name=preview_payload["target_ref_name"],
+            title=preview_payload["title"],
+            description=preview_payload["body_markdown"],
+            is_draft=True,
+        ),
+        repository_id=preview_payload["repository_id"],
+        project=get_project(),
+        supports_iterations=True,
+    )
+    pull_request_summary = _build_pull_request_summary(
+        created_pull_request,
+        preview_payload["repository_name"],
+    )
 
     if pull_request_summary is None or pull_request_summary.get("pull_request_id") is None:
-        raise ValueError("Nao foi possivel resolver a PR da historia apos a tentativa de criacao/recuperacao.")
+        raise ValueError("Nao foi possivel resolver a PR da historia apos a tentativa de criacao.")
 
     pull_request_artifact_id = (
         pull_request_summary.get("artifact_id")
@@ -2823,16 +2921,12 @@ def _create_story_pull_request(
     preview_payload.update(
         {
             "executed": True,
-            "created": created,
+            "created": True,
             "pull_request": pull_request_summary,
             "branch_association_result": branch_association_result,
             "pull_request_association_result": pull_request_association_result,
             "expected_revisions": {str(key): value for key, value in EXPECTED_REVISIONS.get().items()},
-            "message": (
-                "PR Draft criada com sucesso e link retornado ao usuario."
-                if created
-                else "Ja existia uma PR ativa para esta branch; o link existente foi retornado e os work items foram garantidos na branch/PR."
-            ),
+            "message": "PR Draft criada com sucesso e link retornado ao usuario.",
         }
     )
     return _format_json(preview_payload)

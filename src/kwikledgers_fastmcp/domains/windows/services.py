@@ -19,11 +19,14 @@ def _is_wsl() -> bool:
 
 
 def _get_timeout_seconds(env_name: str, default: int) -> int:
+    raw = os.environ.get(env_name, str(default)).strip()
+    if len(raw) > 32:
+        return default
     try:
-        value = int(os.environ.get(env_name, str(default)).strip())
+        value = int(raw)
     except ValueError:
         return default
-    return value if value > 0 else default
+    return min(value, 300) if value > 0 else default
 
 
 def _text(value: str) -> str:
@@ -235,6 +238,14 @@ class WindowsService:
         )
 
 
+class WindowsCapabilityError(RuntimeError):
+    """A Windows failure without PowerShell output or request material."""
+
+    def __init__(self, *, execution_outcome_unknown: bool) -> None:
+        super().__init__("Windows capability failed.")
+        self.execution_outcome_unknown = execution_outcome_unknown
+
+
 async def invoke_windows_capability(name: str, arguments: dict[str, Any]) -> str:
     service = WindowsService()
     handlers = {
@@ -244,8 +255,17 @@ async def invoke_windows_capability(name: str, arguments: dict[str, Any]) -> str
         "schedule_reminder": service.schedule_reminder,
     }
     if name not in handlers:
-        return f"Ferramenta desconhecida: {name}"
-    return await asyncio.to_thread(handlers[name], **arguments)
+        raise ValueError("Unknown Windows capability.")
+    outcome_unknown = name != "get_upcoming_deadlines"
+    try:
+        result = await asyncio.to_thread(handlers[name], **arguments)
+    except (TypeError, ValueError):
+        raise WindowsCapabilityError(execution_outcome_unknown=False) from None
+    except Exception:
+        raise WindowsCapabilityError(execution_outcome_unknown=outcome_unknown) from None
+    if result.startswith("Erro ao "):
+        raise WindowsCapabilityError(execution_outcome_unknown=outcome_unknown) from None
+    return result
 
 
 class FastMcpNotificationAdapter:
