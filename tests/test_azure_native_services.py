@@ -36,6 +36,13 @@ def item(work_item_id: int, title: str, kind: str = "User Story", state: str = "
 
 
 class NativeServiceTests(unittest.TestCase):
+    def test_incomplete_work_item_fields_fail_without_fabricated_summary(self) -> None:
+        self.wit.get_work_items.side_effect = lambda ids, fields=None: [SimpleNamespace(id=1, fields=None)]
+        with self.assertRaisesRegex(RuntimeError, "sem campos válidos"):
+            services._query_assigned_items("dev@example.test")
+        with self.assertRaisesRegex(RuntimeError, "sem campos válidos"):
+            services._query_sprint_stories()
+
     def test_goal_failure_is_observable_without_credentials(self) -> None:
         with patch.object(services.logging, "getLogger") as logger:
             context = services._get_current_sprint_context()

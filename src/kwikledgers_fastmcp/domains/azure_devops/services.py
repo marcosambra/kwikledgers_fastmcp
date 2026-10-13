@@ -16,8 +16,14 @@ from typing import Any, Optional
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from azure.devops.v7_0.git.models import GitPullRequest, GitPullRequestSearchCriteria
-from azure.devops.v7_0.work_item_tracking.models import TeamContext, Wiql, WorkItemClassificationNode
+from azure.devops.v7_0.git.git_client import GitClient
+from azure.devops.v7_0.git.models import GitPullRequest, GitPullRequestSearchCriteria, GitRepository
+from azure.devops.v7_0.work.models import TeamSettingsIteration
+from azure.devops.v7_0.work_item_tracking.models import (
+    IdentityRef, TeamContext, Wiql, WorkItem, WorkItemClassificationNode,
+    WorkItemField, WorkItemRelation, WorkItemTypeFieldWithReferences,
+)
+from azure.devops.v7_0.work_item_tracking.work_item_tracking_client import WorkItemTrackingClient
 
 from .configuration import get_client, get_project, load_configuration, workspace_root
 from .primitives import EXPECTED_REVISIONS, update_work_item, validate_revision
@@ -498,7 +504,7 @@ def _normalize_source_branch(source_branch: str | None) -> tuple[str, str]:
     return plain_branch_name, f"refs/heads/{plain_branch_name}"
 
 
-def _resolve_repository_project_id(repository: Any) -> str:
+def _resolve_repository_project_id(repository: GitRepository) -> str:
     project_reference = getattr(repository, "project", None)
     project_id = getattr(project_reference, "id", None)
     if project_id:
@@ -538,7 +544,7 @@ def _build_repository_aliases(repository_name: str | None) -> set[str]:
     return {alias for alias in aliases if alias}
 
 
-def _resolve_git_repository(git: Any, repository_name: str) -> Any:
+def _resolve_git_repository(git: GitClient, repository_name: str) -> GitRepository:
     normalized_repository_name = str(repository_name or "").strip()
     if not normalized_repository_name:
         raise ValueError("repository_name e obrigatorio para o fluxo de branch/PR da historia.")
@@ -679,7 +685,7 @@ def _build_pull_request_body_markdown(
     return "\n".join(lines).strip()
 
 
-def _extract_relation_name(relation: Any) -> str | None:
+def _extract_relation_name(relation: WorkItemRelation) -> str | None:
     attributes = getattr(relation, "attributes", None) or {}
     if isinstance(attributes, dict):
         relation_name = attributes.get("name")
@@ -747,7 +753,7 @@ def _get_story_pr_work_item_fields() -> list[str]:
     ]
 
 
-def _get_work_item_snapshot(wit: Any, work_item_id: int) -> dict[str, Any]:
+def _get_work_item_snapshot(wit: WorkItemTrackingClient, work_item_id: int) -> dict[str, Any]:
     item = wit.get_work_item(id=work_item_id, expand="Relations")
     fields = getattr(item, "fields", {}) or {}
     resolved_work_item_id = int(fields.get("System.Id") or work_item_id)
@@ -777,7 +783,7 @@ def _normalize_related_work_item_ids(related_work_item_ids: list[int] | None) ->
 
 
 def _resolve_story_related_work_items(
-    wit: Any,
+    wit: WorkItemTrackingClient,
     story_id: int,
     related_work_item_ids: list[int] | None = None,
     include_child_work_items: bool = True,
@@ -841,8 +847,8 @@ def _resolve_story_related_work_items(
 
 
 def _build_story_branch_association_preview_payload(
-    wit: Any,
-    repository: Any,
+    wit: WorkItemTrackingClient,
+    repository: GitRepository,
     story_id: int,
     source_branch: str,
     related_work_item_ids: list[int] | None = None,
@@ -929,7 +935,7 @@ def _build_story_branch_association_preview_payload(
     }
 
 
-def _check_association_revisions(wit: Any, work_items: list[dict[str, Any]]) -> None:
+def _check_association_revisions(wit: WorkItemTrackingClient, work_items: list[dict[str, Any]]) -> None:
     expected = EXPECTED_REVISIONS.get()
     target_ids = {int(entry["id"]) for entry in work_items}
     if set(expected) != target_ids:
@@ -941,7 +947,7 @@ def _check_association_revisions(wit: Any, work_items: list[dict[str, Any]]) -> 
 
 
 def _associate_artifact_to_work_items(
-    wit: Any,
+    wit: WorkItemTrackingClient,
     work_items: list[dict[str, Any]],
     artifact_url: str,
     artifact_name: str,
@@ -1003,11 +1009,11 @@ def _associate_artifact_to_work_items(
 
 
 def _find_existing_active_pull_request(
-    git: Any,
+    git: GitClient,
     repository_id: str,
     source_ref_name: str,
     target_ref_name: str,
-) -> Any | None:
+) -> GitPullRequest | None:
     pull_requests = git.get_pull_requests(
         repository_id=repository_id,
         search_criteria=get_active_pr_search_criteria(),
@@ -1026,7 +1032,7 @@ def _find_existing_active_pull_request(
     return None
 
 
-def _build_pull_request_summary(pull_request: Any, repository_name: str) -> dict[str, Any]:
+def _build_pull_request_summary(pull_request: GitPullRequest, repository_name: str) -> dict[str, Any]:
     pull_request_id = getattr(pull_request, "pull_request_id", None)
     return {
         "pull_request_id": pull_request_id,
@@ -1041,9 +1047,9 @@ def _build_pull_request_summary(pull_request: Any, repository_name: str) -> dict
 
 
 def _build_story_pull_request_preview_payload(
-    wit: Any,
-    git: Any,
-    repository: Any,
+    wit: WorkItemTrackingClient,
+    git: GitClient,
+    repository: GitRepository,
     story_id: int,
     source_branch: str,
     what_was_changed: str,
@@ -1222,7 +1228,7 @@ def _save_repo_technical_debt_preview_entry(
     return str(cache_path)
 
 
-def _normalize_child_task_preview(task: Any) -> dict[str, Any]:
+def _normalize_child_task_preview(task: object) -> dict[str, Any]:
     if not isinstance(task, dict):
         raise ValueError("Cada child task do preview deve ser um objeto JSON.")
 
@@ -1316,11 +1322,18 @@ def _is_technical_debt_type(work_item_type: str | None) -> bool:
     }
 
 
-def _get_work_items_in_batches(wit: Any, ids: list[str], fields: list[str], batch_size: int = 75) -> list[Any]:
+def _work_item_fields(item: WorkItem) -> dict[str, Any]:
+    fields = item.fields
+    if not isinstance(fields, dict):
+        raise RuntimeError("Azure retornou um work item sem campos válidos.")
+    return fields
+
+
+def _get_work_items_in_batches(wit: WorkItemTrackingClient, ids: list[str], fields: list[str], batch_size: int = 75) -> list[WorkItem]:
     if not ids:
         return []
 
-    items: list[Any] = []
+    items: list[WorkItem] = []
     for start_index in range(0, len(ids), batch_size):
         batch_ids = ids[start_index:start_index + batch_size]
         items.extend(wit.get_work_items(ids=batch_ids, fields=fields))
@@ -1570,7 +1583,7 @@ def _build_story_summary(description: str, acceptance_criteria: str, story: dict
     return summary
 
 
-def _serialize_datetime(value: Any) -> str | None:
+def _serialize_datetime(value: datetime | str | None) -> str | None:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -1700,7 +1713,7 @@ def _get_current_sprint_context() -> dict[str, Any]:
     return context
 
 
-def _serialize_iteration(iteration: Any) -> dict[str, Any]:
+def _serialize_iteration(iteration: TeamSettingsIteration) -> dict[str, Any]:
     attributes = getattr(iteration, "attributes", None)
     return {
         "name": getattr(iteration, "name", None),
@@ -1884,7 +1897,7 @@ def _get_next_sprint_context() -> dict[str, Any]:
     return next_sprint
 
 
-def _append_work_item_field_patch(document: list[dict[str, Any]], field_name: str, value: Any) -> None:
+def _append_work_item_field_patch(document: list[dict[str, Any]], field_name: str, value: str | float | None) -> None:
     if value is None:
         return
 
@@ -1901,7 +1914,7 @@ def _normalize_lookup_key(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", " ", ascii_value.lower()).strip()
 
 
-def _get_available_work_item_types(wit: Any) -> dict[str, str]:
+def _get_available_work_item_types(wit: WorkItemTrackingClient) -> dict[str, str]:
     project = get_project()
     cached_types = WORK_ITEM_TYPE_CACHE.get(project)
     if cached_types is not None:
@@ -1918,7 +1931,7 @@ def _get_available_work_item_types(wit: Any) -> dict[str, str]:
     return available_types
 
 
-def _resolve_work_item_type_name(wit: Any, requested_work_item_type: str) -> str:
+def _resolve_work_item_type_name(wit: WorkItemTrackingClient, requested_work_item_type: str) -> str:
     normalized_requested_type = _normalize_lookup_key(requested_work_item_type)
     if not normalized_requested_type:
         raise ValueError("work_item_type e obrigatorio para criar um work item.")
@@ -1941,7 +1954,7 @@ def _resolve_work_item_type_name(wit: Any, requested_work_item_type: str) -> str
     )
 
 
-def _extract_reference_name(field_definition: Any) -> str | None:
+def _extract_reference_name(field_definition: WorkItemTypeFieldWithReferences | WorkItemField) -> str | None:
     reference_name = getattr(field_definition, "reference_name", None)
     if isinstance(reference_name, str) and reference_name.strip():
         return reference_name.strip()
@@ -1954,7 +1967,7 @@ def _extract_reference_name(field_definition: Any) -> str | None:
     return None
 
 
-def _get_supported_work_item_fields(wit: Any, work_item_type: str) -> set[str]:
+def _get_supported_work_item_fields(wit: WorkItemTrackingClient, work_item_type: str) -> set[str]:
     project = get_project()
     cache_key = (project, work_item_type)
     cached_fields = WORK_ITEM_FIELD_CACHE.get(cache_key)
@@ -1983,7 +1996,7 @@ def _append_supported_work_item_field_patch(
     document: list[dict[str, Any]],
     supported_fields: set[str],
     field_name: str,
-    value: Any,
+    value: str | float | None,
     applied_fields: list[str],
     skipped_fields: list[str],
 ) -> None:
@@ -2041,7 +2054,7 @@ def _build_effort_payload(
     return payload
 
 
-def _serialize_work_item_payload(item: Any, extra_payload: Optional[dict[str, Any]] = None) -> str:
+def _serialize_work_item_payload(item: WorkItem, extra_payload: Optional[dict[str, Any]] = None) -> str:
     fields = getattr(item, "fields", {}) or {}
     payload = {
         "id": fields.get("System.Id", getattr(item, "id", None)),
@@ -2064,7 +2077,7 @@ def _serialize_work_item_payload(item: Any, extra_payload: Optional[dict[str, An
     return _format_json(payload)
 
 
-def _confirm_work_item_status(item: Any, work_item_id: int, status: str | None) -> None:
+def _confirm_work_item_status(item: WorkItem, work_item_id: int, status: str | None) -> None:
     if getattr(item, "id", None) != work_item_id:
         raise RuntimeError("Azure returned a different work item after the update.")
     validate_revision(getattr(item, "rev", None))
@@ -2084,13 +2097,13 @@ def _is_blocked_item(fields: dict[str, Any]) -> bool:
     )
 
 
-def _is_completed_state(state: Any) -> bool:
+def _is_completed_state(state: str | None) -> bool:
     return str(state or "").strip().lower() in COMPLETED_STATES
 
 
-def _serialize_assigned_to(value: Any) -> str:
+def _serialize_assigned_to(value: IdentityRef | dict[str, object] | str | None) -> str:
     if isinstance(value, dict):
-        return value.get("displayName") or value.get("uniqueName") or "Nao atribuido"
+        return str(value.get("displayName") or value.get("uniqueName") or "Nao atribuido")
 
     display_name = getattr(value, "display_name", None) or getattr(value, "displayName", None)
     unique_name = getattr(value, "unique_name", None) or getattr(value, "uniqueName", None)
@@ -2137,7 +2150,7 @@ def _query_assigned_items(email: str, sprint_path: str | None = None) -> list[di
 
     serialized_items: list[dict[str, Any]] = []
     for item in items:
-        fields = item.fields
+        fields = _work_item_fields(item)
         serialized_items.append({
             "id": fields.get("System.Id"),
             "title": fields.get("System.Title"),
@@ -2241,9 +2254,9 @@ def _query_child_items_summary(parent_items: list[dict[str, Any]]) -> dict[str, 
 
     serialized_children: dict[int, dict[str, Any]] = {}
     for item in child_items:
-        fields = item.fields
+        fields = _work_item_fields(item)
         state = fields.get("System.State")
-        child_id = int(fields.get("System.Id"))
+        child_id = int(fields["System.Id"])
         serialized_children[child_id] = {
             "id": child_id,
             "title": fields.get("System.Title"),
@@ -2323,7 +2336,7 @@ def _query_sprint_stories(include_details: bool = False, sprint_path: str | None
 
     serialized_stories: list[dict[str, Any]] = []
     for item in items:
-        fields = item.fields
+        fields = _work_item_fields(item)
         state = fields.get("System.State")
         serialized_stories.append({
             "id": fields.get("System.Id"),
@@ -2648,7 +2661,7 @@ def _get_user_stories(email: str) -> str:
 
     lines = ["Historias atribuidas:\n"]
     for item in items:
-        fields = item.fields
+        fields = _work_item_fields(item)
         lines.append(
             f"KL-{fields['System.Id']}: {fields['System.Title']}\n"
             f"  Status: {fields['System.State']} | "
@@ -2689,7 +2702,7 @@ def _get_story_details(story_id: int) -> str:
 
     item = wit.get_work_item(id=story_id, expand="Relations")
 
-    fields = item.fields
+    fields = _work_item_fields(item)
     assigned = fields.get("System.AssignedTo") or {}
     assigned_email = assigned.get("uniqueName") if isinstance(assigned, dict) else getattr(assigned, "unique_name", None)
     parent_ids = [
@@ -2730,7 +2743,7 @@ def _get_story_details(story_id: int) -> str:
             ])
             lines.append("Tasks:")
             for task in tasks:
-                task_fields = task.fields
+                task_fields = _work_item_fields(task)
                 children.append(json.loads(_serialize_work_item_payload(task)))
                 lines.append(
                     f"  - [{task_fields['System.State']}] {task_fields['System.Title']} "
@@ -3353,7 +3366,7 @@ def _move_work_item_to_next_sprint(work_item_id: int, comment: str | None = None
         "System.AssignedTo",
         "System.IterationPath",
     ])
-    current_fields = current_item.fields
+    current_fields = _work_item_fields(current_item)
     previous_iteration_path = str(current_fields.get("System.IterationPath") or "").strip()
 
     if previous_iteration_path == target_iteration_path:
