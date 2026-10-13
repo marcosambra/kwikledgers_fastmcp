@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import subprocess
 import re
 import unicodedata
@@ -16,7 +17,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from azure.devops.v7_0.git.models import GitPullRequest, GitPullRequestSearchCriteria
-from azure.devops.v7_0.work_item_tracking.models import TeamContext, Wiql
+from azure.devops.v7_0.work_item_tracking.models import TeamContext, Wiql, WorkItemClassificationNode
 
 from .configuration import get_client, get_project, load_configuration, workspace_root
 from .primitives import EXPECTED_REVISIONS, update_work_item, validate_revision
@@ -408,10 +409,10 @@ class _GeneratedAzureHTMLValidator(HTMLParser):
             self.valid = False
 
     def handle_entityref(self, name: str) -> None:
-        self.handle_data("&" + name + ";")
+        self.handle_data(f"&{name};")
 
     def handle_charref(self, name: str) -> None:
-        self.handle_data("&#" + name + ";")
+        self.handle_data(f"&#{name};")
 
     def handle_comment(self, data: str) -> None:
         self.valid = False
@@ -1693,8 +1694,8 @@ def _get_current_sprint_context() -> dict[str, Any]:
                 context["goal"] = _normalize_whitespace(goal)
                 context["goal_available"] = True
                 context["goal_note"] = None
-    except Exception:
-        pass
+    except Exception as error:
+        logging.getLogger(__name__).debug("Consulta da meta da sprint indisponível (%s).", type(error).__name__)
 
     return context
 
@@ -2102,10 +2103,11 @@ def _serialize_assigned_to(value: Any) -> str:
     return raw_value or "Nao atribuido"
 
 
-def _query_assigned_items(email: str) -> list[dict[str, Any]]:
+def _query_assigned_items(email: str, sprint_path: str | None = None) -> list[dict[str, Any]]:
     connection = get_client()
     wit = connection.clients.get_work_item_tracking_client()
     escaped_email = email.replace("'", "''")
+    iteration = "'{}'".format(sprint_path.replace("'", "''")) if sprint_path else "@CurrentIteration"
 
     query = Wiql(query=f"""
         SELECT [System.Id], [System.Title], [System.State], [System.WorkItemType],
@@ -2114,7 +2116,7 @@ def _query_assigned_items(email: str) -> list[dict[str, Any]]:
                [System.Tags]
         FROM WorkItems
         WHERE [System.AssignedTo] = '{escaped_email}'
-          AND [System.IterationPath] = @CurrentIteration
+          AND [System.IterationPath] = {iteration}
                     AND (
                                 [System.WorkItemType] = 'Task'
                                 OR [System.State] NOT IN {ACTIVE_DAILY_SUMMARY_EXCLUDED_STATES}
@@ -2191,7 +2193,7 @@ def _query_child_items_summary(parent_items: list[dict[str, Any]]) -> dict[str, 
     wit = connection.clients.get_work_item_tracking_client()
 
     parent_lookup = {
-        int(item.get("id")): item
+        int(item["id"]): item
         for item in parent_items
         if item.get("id") is not None
     }
@@ -2285,17 +2287,18 @@ def _query_child_items_summary(parent_items: list[dict[str, Any]]) -> dict[str, 
     }
 
 
-def _query_sprint_stories(include_details: bool = False) -> list[dict[str, Any]]:
+def _query_sprint_stories(include_details: bool = False, sprint_path: str | None = None) -> list[dict[str, Any]]:
     connection = get_client()
     wit = connection.clients.get_work_item_tracking_client()
 
-    query = Wiql(query="""
+    iteration = "'{}'".format(sprint_path.replace("'", "''")) if sprint_path else "@CurrentIteration"
+    query = Wiql(query=f"""
         SELECT [System.Id], [System.Title], [System.State], [System.AssignedTo],
                [System.IterationPath], [System.ChangedDate],
                [Microsoft.VSTS.Scheduling.StoryPoints], [System.Tags]
         FROM WorkItems
         WHERE [System.WorkItemType] = 'User Story'
-          AND [System.IterationPath] = @CurrentIteration
+          AND [System.IterationPath] = {iteration}
           AND [System.State] <> 'Removed'
         ORDER BY [Microsoft.VSTS.Common.Priority] ASC, [System.ChangedDate] DESC
     """)
@@ -2432,10 +2435,75 @@ def _build_project_progress(sprint_stories: list[dict[str, Any]]) -> dict[str, A
     }
 
 
-def _build_daily_summary(email: str) -> dict[str, Any]:
+def _available_sprint_contexts() -> list[dict[str, Any]]:
+    wit = get_client().clients.get_work_item_tracking_client()
+    root = wit.get_classification_node(project=get_project(), structure_group="iterations", depth=6)
+    contexts: list[dict[str, Any]] = []
+
+    def collect(node: WorkItemClassificationNode) -> None:
+        name = str(getattr(node, "name", "") or "")
+        sprint_path = _normalize_classification_iteration_path(getattr(node, "path", None))
+        if sprint_path and _extract_sprint_number(name) is not None:
+            attributes = getattr(node, "attributes", None)
+            if isinstance(attributes, dict):
+                start = attributes.get("startDate")
+                finish = attributes.get("finishDate")
+            else:
+                start = getattr(attributes, "start_date", None)
+                finish = getattr(attributes, "finish_date", None)
+            contexts.append({"name": name, "path": sprint_path, "sprint_number": _extract_sprint_number(name),
+                             "start_date": _serialize_datetime(start), "finish_date": _serialize_datetime(finish),
+                             "goal": None, "goal_available": False,
+                             "goal_note": "A API de classificações não expõe a meta da sprint."})
+        for child in getattr(node, "children", None) or []:
+            collect(child)
+
+    collect(root)
+    return sorted(contexts, key=lambda context: (
+        _extract_iteration_year(context["path"]) or 0,
+        _extract_sprint_number(context["name"]) or 0,
+        _is_plain_sprint_name(context["name"]), context["path"],
+    ), reverse=True)
+
+
+def _select_summary_sprint(sprints: list[dict[str, Any]], sprint_path: str | None) -> dict[str, Any]:
+    if sprint_path is not None:
+        if not isinstance(sprint_path, str) or not sprint_path.strip():
+            raise ValueError("O caminho da sprint selecionada deve ser preenchido.")
+        selected = next((sprint for sprint in sprints if sprint["path"] == sprint_path), None)
+        if selected is None:
+            raise ValueError("A sprint selecionada não existe no projeto configurado.")
+        return dict(selected)
+    current = _get_current_sprint_context()
+    candidates = [
+        sprint for sprint in sprints
+        if _extract_iteration_year(sprint["path"]) == _extract_iteration_year(current.get("path"))
+        and _extract_sprint_number(sprint["name"]) == _extract_sprint_number(current.get("name"))
+        and _is_plain_sprint_name(sprint["name"])
+    ]
+    principal = min(candidates, key=lambda sprint: sprint["path"].count("\\"), default=None)
+    return dict(principal) if principal else current
+
+
+def _build_daily_summary(email: str, sprint_path: str | None = None, story_id: int | None = None) -> dict[str, Any]:
+    available_sprints = _available_sprint_contexts()
+    branch_sprint_path = None
+    if story_id is not None:
+        if isinstance(story_id, bool) or not isinstance(story_id, int) or story_id <= 0:
+            raise ValueError("O ID da história da branch deve ser um inteiro positivo.")
+        snapshot = _get_work_item_snapshot(get_client().clients.get_work_item_tracking_client(), story_id)
+        if str(snapshot.get("work_item_type") or "").lower() not in {"user story", "history", "história"}:
+            raise ValueError("O item identificado na branch não é uma história.")
+        branch_sprint_path = snapshot.get("iteration_path")
+        if not branch_sprint_path:
+            raise ValueError("A história da branch não possui uma sprint associada.")
+        _select_summary_sprint(available_sprints, branch_sprint_path)
+        if sprint_path is None:
+            sprint_path = branch_sprint_path
+    sprint_context = _select_summary_sprint(available_sprints, sprint_path)
     resolved_email, email_source, env_file_path = _resolve_active_user_identity()
     user_name = _resolve_active_user_name(email)
-    items = _query_assigned_items(email)
+    items = _query_assigned_items(email, sprint_path=sprint_context.get("path"))
     blocked_items = [item for item in items if item["is_blocked"]]
     story_items = [item for item in items if _is_story_type(item.get("work_item_type"))]
     task_items = [item for item in items if _is_task_type(item.get("work_item_type"))]
@@ -2444,9 +2512,8 @@ def _build_daily_summary(email: str) -> dict[str, Any]:
     child_items_summary = _query_child_items_summary(items)
     assigned_story_points = sum(float(item["story_points"] or 0) for item in items)
     remaining_work_hours = sum(float(item["remaining_work_hours"] or 0) for item in items)
-    sprint_stories = _query_sprint_stories()
+    sprint_stories = _query_sprint_stories(sprint_path=sprint_context.get("path"))
     project_progress = _build_project_progress(sprint_stories)
-    sprint_context = _get_current_sprint_context()
 
     open_prs: list[dict[str, Any]] = []
     connection = get_client()
@@ -2498,6 +2565,9 @@ def _build_daily_summary(email: str) -> dict[str, Any]:
         "assigned_story_points": round(assigned_story_points, 2),
         "remaining_work_hours": remaining_work_hours,
         "sprint_context": sprint_context,
+        "available_sprints": available_sprints,
+        "branch_sprint_path": branch_sprint_path,
+        "branch_story_id": story_id,
         "project_progress": project_progress,
         "child_items_summary": child_items_summary,
         "sprint_stories": sprint_stories,
@@ -2542,12 +2612,12 @@ def _get_my_blocked_items() -> str:
     })
 
 
-def _get_my_daily_summary() -> str:
+def _get_my_daily_summary(sprint_path: str | None = None, story_id: int | None = None) -> str:
     email = _resolve_active_user_email()
     if not email:
         return "Email nao configurado. Configure AZURE_USER_EMAIL no .env ou git config --global user.email seu@email.com"
 
-    return _format_json(_build_daily_summary(email))
+    return _format_json(_build_daily_summary(email, sprint_path=sprint_path, story_id=story_id))
 
 
 def _get_user_stories(email: str) -> str:

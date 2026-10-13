@@ -36,6 +36,66 @@ def item(work_item_id: int, title: str, kind: str = "User Story", state: str = "
 
 
 class NativeServiceTests(unittest.TestCase):
+    def test_goal_failure_is_observable_without_credentials(self) -> None:
+        with patch.object(services.logging, "getLogger") as logger:
+            context = services._get_current_sprint_context()
+        self.assertFalse(context["goal_available"])
+        logger.return_value.debug.assert_called_once_with(
+            "Consulta da meta da sprint indisponível (%s).", "OSError"
+        )
+
+    def test_branch_story_resolves_sprint_and_number_ignores_suffix(self) -> None:
+        year = datetime.now().year
+        selected_path = f"Project\\{year}\\Accountant e Admin\\Sprint 20 - Accountant e Admin"
+        self.items[1].fields["System.IterationPath"] = selected_path
+        self.wit.get_classification_node.return_value = SimpleNamespace(children=[
+            SimpleNamespace(name="Sprint 20 - Accountant e Admin", path=selected_path, attributes={}, children=[])
+        ])
+        payload = self.invoke("get_my_daily_summary", story_id=1)
+        self.assertEqual(payload["sprint_context"]["path"], selected_path)
+        self.assertEqual(payload["sprint_context"]["sprint_number"], 20)
+        self.assertEqual(payload["branch_sprint_path"], selected_path)
+        for call in self.wit.query_by_wiql.call_args_list:
+            self.assertIn(f"[System.IterationPath] = '{selected_path}'", call.args[0].query)
+        self.assertFalse(self.wit.update_work_item.called)
+        self.assertFalse(self.wit.create_work_item.called)
+        manual_path = f"Project\\{year}\\Sustentacao\\Sprint 20 - Sustentacao"
+        self.wit.get_classification_node.return_value.children.append(
+            SimpleNamespace(name="Sprint 20 - Sustentacao", path=manual_path, attributes={}, children=[])
+        )
+        manual = self.invoke("get_my_daily_summary", story_id=1, sprint_path=manual_path)
+        self.assertEqual(manual["sprint_context"]["path"], manual_path)
+        self.assertEqual(manual["branch_sprint_path"], selected_path)
+        for name in ("Sprint 20", "Sprint 20 - Sustentacao", "Sprint 20 - Customer e Loja"):
+            self.assertEqual(services._extract_sprint_number(name), 20)
+        with self.assertRaises(ValueError):
+            services._get_my_daily_summary(story_id=2)
+
+    def test_summary_lists_parallel_sprints_and_defaults_to_main(self) -> None:
+        year = datetime.now().year
+        attributes = {"startDate": "2026-10-01", "finishDate": "2026-10-15"}
+        main = SimpleNamespace(name="Sprint 20", path=f"\\Project\\Iteration\\{year}\\Sprint 20", attributes=attributes, children=[])
+        support = SimpleNamespace(name="Sprint 20 - Sustentacao", path=f"\\Project\\Iteration\\{year}\\Sustentacao\\Sprint 20 - Sustentacao", attributes=attributes, children=[])
+        self.wit.get_classification_node.return_value = SimpleNamespace(children=[main, SimpleNamespace(name="Sustentacao", children=[support])])
+        self.work.get_team_iterations.return_value = [SimpleNamespace(name=support.name, path=f"Project\\{year}\\Sustentacao\\Sprint 20 - Sustentacao", attributes=SimpleNamespace())]
+        payload = json.loads(services._get_my_daily_summary())
+        self.assertEqual(payload["sprint_context"]["name"], "Sprint 20")
+        self.assertEqual(len(payload["available_sprints"]), 2)
+        selected_path = f"Project\\{year}\\Sustentacao\\Sprint 20 - Sustentacao"
+        selected = json.loads(services._get_my_daily_summary(sprint_path=selected_path))
+        self.assertEqual(selected["sprint_context"]["path"], selected_path)
+        self.assertEqual(selected["sprint_context"]["start_date"], "2026-10-01")
+        with self.assertRaises(ValueError):
+            services._get_my_daily_summary(sprint_path="AnotherProject\\Sprint 20")
+
+    def test_explicit_sprint_path_is_used_for_items_and_stories(self) -> None:
+        sprint_path = "Project\\2026\\Sustentacao\\Sprint 20 - Sustentacao"
+        services._query_assigned_items("dev@example.test", sprint_path=sprint_path)
+        services._query_sprint_stories(sprint_path=sprint_path)
+        queries = [call.args[0].query for call in self.wit.query_by_wiql.call_args_list]
+        self.assertTrue(all(f"[System.IterationPath] = '{sprint_path}'" in query for query in queries))
+        self.assertTrue(all("@CurrentIteration" not in query for query in queries))
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -617,7 +677,7 @@ class NativeServiceTests(unittest.TestCase):
                     return {"message": value}
             if isinstance(value, dict):
                 return {key: normalize(child) if isinstance(child, (dict, list)) else child
-                        for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "context_persistence", "similarity_analysis_owner", "recommended_story_status_transition"}}
+                        for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "context_persistence", "similarity_analysis_owner", "recommended_story_status_transition", "available_sprints", "branch_sprint_path", "branch_story_id"}}
             if isinstance(value, list):
                 return [normalize(child) for child in value]
             return value
