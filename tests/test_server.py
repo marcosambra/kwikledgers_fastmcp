@@ -3,14 +3,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import hmac
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import types
 import unittest
 from datetime import datetime, timedelta, timezone
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -154,16 +155,15 @@ class LegacyGatewayTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             asyncio.run(invoke_legacy_capability(definition, {"approved": True}))
 
-    def test_execute_capability_requires_signed_langgraph_token(self) -> None:
+    def test_execute_capability_requires_langgraph_token(self) -> None:
         definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
 
         with self.assertRaises(RuntimeError):
             asyncio.run(invoke_legacy_capability(definition, {"story_id": 1, "status": "Closed"}))
 
-    def test_execute_capability_allows_signed_matching_payload(self) -> None:
+    def test_execute_capability_allows_registered_matching_payload_once(self) -> None:
         definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
         arguments = {"story_id": 1, "status": "Closed", "expected_revision": 1}
-        token = self._build_execution_token(definition.name, arguments)
 
         async def dispatch(name: str, received_arguments: dict[str, object]) -> dict[str, object]:
             self.assertEqual(name, "update_story_status")
@@ -176,9 +176,11 @@ class LegacyGatewayTestCase(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as temporary_directory:
+            ledger = Path(temporary_directory) / "ledger.sqlite3"
+            token = self._build_execution_token(definition.name, arguments, ledger)
             with patch.dict(os.environ, {
-                "KWIKLEDGERS_FASTMCP_EXECUTION_KEY": "test-key",
-                "KWIKLEDGERS_FASTMCP_CAPABILITY_LEDGER": str(Path(temporary_directory) / "ledger.sqlite3"),
+                "KWIKLEDGERS_FASTMCP_EXECUTION_KEY": "",
+                "KWIKLEDGERS_FASTMCP_CAPABILITY_LEDGER": str(ledger),
             }, clear=False):
                 with patch("kwikledgers_fastmcp.shared.legacy_gateway.invoke_azure_capability", new=dispatch):
                     result = asyncio.run(
@@ -187,13 +189,17 @@ class LegacyGatewayTestCase(unittest.TestCase):
                             {**arguments, "execution_capability": token},
                         )
                     )
+                    with self.assertRaisesRegex(RuntimeError, "já foi consumida"):
+                        asyncio.run(invoke_legacy_capability(definition, {**arguments, "execution_capability": token}))
 
         self.assertEqual(result["data"]["status"], "updated")
 
-    def _build_execution_token(self, capability_name: str, arguments: dict[str, object]) -> str:
+    def _build_execution_token(self, capability_name: str, arguments: dict[str, object], ledger: Path) -> str:
         serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         now = datetime.now(timezone.utc)
         payload = {
+            "version": 1,
+            "action": "story_status_transition.execute",
             "capability": capability_name,
             "payload_digest": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
             "run_id": "test-run",
@@ -204,8 +210,19 @@ class LegacyGatewayTestCase(unittest.TestCase):
         }
         payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         encoded_payload = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
-        signature = hmac.new(b"test-key", payload_bytes, hashlib.sha256).hexdigest()
-        return f"{encoded_payload}.{signature}"
+        token = f"{encoded_payload}.local-v1"
+        with closing(sqlite3.connect(ledger)) as connection:
+            with connection:
+                connection.execute(
+                    "CREATE TABLE local_execution_capabilities "
+                    "(token_digest TEXT PRIMARY KEY, nonce_digest TEXT UNIQUE NOT NULL, expires_at REAL NOT NULL)"
+                )
+                connection.execute("INSERT INTO local_execution_capabilities VALUES (?, ?, ?)", (
+                    hashlib.sha256(token.encode("ascii")).hexdigest(),
+                    hashlib.sha256(payload["nonce"].encode("ascii")).hexdigest(),
+                    datetime.fromisoformat(payload["expires_at"]).timestamp(),
+                ))
+        return token
 
 
 class FastMcpTrackingSyncAdapterTestCase(unittest.TestCase):

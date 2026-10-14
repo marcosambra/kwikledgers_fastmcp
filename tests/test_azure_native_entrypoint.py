@@ -22,7 +22,7 @@ class NativeEntrypointTests(unittest.TestCase):
         self.addCleanup(configuration.stop)
 
     def test_full_catalog_has_21_handlers(self) -> None:
-        self.assertEqual(len(CAPABILITIES), 21)
+        self.assertEqual(len(CAPABILITIES), 22)
         self.assertEqual(sum(operation == "execute" for operation, _ in CAPABILITIES.values()), 9)
 
     def test_every_handler_normalizes_json_and_text_without_transport(self) -> None:

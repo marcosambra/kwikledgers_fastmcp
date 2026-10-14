@@ -293,6 +293,19 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(data["sprint_stories"][0]["acceptance_criteria"], "Existing criteria.")
         self.assertIn("Criterio-chave", data["sprint_stories"][0]["summary"])
 
+    def test_get_sprint_work_report_groups_tasks_by_story(self) -> None:
+        self.items[2].relations = [SimpleNamespace(rel="System.LinkTypes.Hierarchy-Reverse", url="https://example.test/wit/1")]
+        self.wit.get_classification_node.return_value = SimpleNamespace(children=[
+            SimpleNamespace(name="Sprint 20", path="Project\\2026\\Sprint 20", attributes={}, children=[])
+        ])
+        data = self.invoke("get_sprint_work_report", sprint_path="Project\\2026\\Sprint 20", email="dev@example.test")
+        story = next(entry for entry in data["stories"] if entry["id"] == 1)
+        self.assertEqual([task["id"] for task in story["tasks"]], [2])
+        self.assertTrue(story["tasks"][0]["is_completed"])
+        self.assertEqual(data["counts"]["orphan_items"], 2)
+        self.assertIn("[System.ChangedBy]", self.wit.query_by_wiql.call_args.args[0].query)
+        self.wit.update_work_item.assert_not_called()
+
     def test_get_story_details_includes_child_tasks(self) -> None:
         data = self.invoke("get_story_details", story_id=1)
         self.assertIn("=== KL-1: Parent story ===", data["message"])

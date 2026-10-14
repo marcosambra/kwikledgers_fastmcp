@@ -22,6 +22,7 @@ CAPABILITIES: dict[str, tuple[str, Callable[..., str]]] = {
     "get_sprint_stories": ("read", services._get_sprint_stories),
     "get_sprint_stories_detailed": ("read", services._get_sprint_stories_detailed),
     "get_story_details": ("read", services._get_story_details),
+    "get_sprint_work_report": ("read", services._get_sprint_work_report),
     "get_open_prs": ("read", services._get_open_prs),
     "preview_story_branch_association": ("preview", services._preview_story_branch_association),
     "preview_story_pull_request": ("preview", services._preview_story_pull_request),

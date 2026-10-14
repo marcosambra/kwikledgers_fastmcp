@@ -2633,6 +2633,117 @@ def _get_my_daily_summary(sprint_path: str | None = None, story_id: int | None =
     return _format_json(_build_daily_summary(email, sprint_path=sprint_path, story_id=story_id))
 
 
+def _identity_matches(value: IdentityRef | dict[str, object] | str | None, email: str) -> bool:
+    unique_name = value.get("uniqueName") if isinstance(value, dict) else getattr(value, "unique_name", None)
+    return str(unique_name or "").lower() == email.lower()
+
+
+def _serialize_report_item(item: WorkItem, email: str) -> dict[str, Any]:
+    fields = _work_item_fields(item)
+    state = fields.get("System.State")
+    return {
+        "id": fields.get("System.Id"),
+        "title": fields.get("System.Title"),
+        "state": state,
+        "work_item_type": fields.get("System.WorkItemType"),
+        "iteration_path": fields.get("System.IterationPath"),
+        "story_points": fields.get("Microsoft.VSTS.Scheduling.StoryPoints") or 0,
+        "assigned_to": _serialize_assigned_to(fields.get("System.AssignedTo")),
+        "assigned_to_user": _identity_matches(fields.get("System.AssignedTo"), email),
+        "last_changed_by_user": _identity_matches(fields.get("System.ChangedBy"), email),
+        "changed_at": str(fields.get("System.ChangedDate", "")),
+        "is_completed": _is_completed_state(state),
+    }
+
+
+def _parent_id_of(work_item: WorkItem) -> int | None:
+    for relation in getattr(work_item, "relations", None) or []:
+        if getattr(relation, "rel", "") == "System.LinkTypes.Hierarchy-Reverse":
+            parent_id = str(getattr(relation, "url", "")).rstrip("/").split("/")[-1]
+            if parent_id.isdigit():
+                return int(parent_id)
+    return None
+
+
+def _build_sprint_work_report(email: str, sprint_path: str | None = None) -> dict[str, Any]:
+    sprint = _select_summary_sprint(_available_sprint_contexts(), sprint_path)
+    wit = get_client().clients.get_work_item_tracking_client()
+    escaped_email = email.replace("'", "''")
+    iteration = sprint["path"].replace("'", "''")
+    query = Wiql(query=f"""
+        SELECT [System.Id]
+        FROM WorkItems
+        WHERE [System.IterationPath] = '{iteration}'
+          AND [System.State] <> 'Removed'
+          AND ([System.AssignedTo] = '{escaped_email}' OR [System.ChangedBy] = '{escaped_email}')
+        ORDER BY [System.ChangedDate] DESC
+    """)
+    result = wit.query_by_wiql(query, team_context=get_team_context())
+    fields = [
+        "System.Id", "System.Title", "System.State", "System.WorkItemType", "System.IterationPath",
+        "System.AssignedTo", "System.ChangedBy", "System.ChangedDate",
+        "Microsoft.VSTS.Scheduling.StoryPoints",
+    ]
+    touched = _get_work_items_in_batches(wit, ids=[str(w.id) for w in result.work_items or []], fields=fields) \
+        if result.work_items else []
+
+    stories: dict[int, dict[str, Any]] = {}
+    orphan_items: list[dict[str, Any]] = []
+    for work_item in touched:
+        serialized = _serialize_report_item(work_item, email)
+        if _is_story_type(serialized["work_item_type"]):
+            stories.setdefault(serialized["id"], {**serialized, "tasks": []})
+    pending_parents: dict[int, list[dict[str, Any]]] = {}
+    for work_item in touched:
+        serialized = _serialize_report_item(work_item, email)
+        if _is_story_type(serialized["work_item_type"]):
+            continue
+        parent_id = _parent_id_of(wit.get_work_item(id=serialized["id"], expand="Relations"))
+        if parent_id is None:
+            orphan_items.append(serialized)
+        elif parent_id in stories:
+            stories[parent_id]["tasks"].append(serialized)
+        else:
+            pending_parents.setdefault(parent_id, []).append(serialized)
+
+    if pending_parents:
+        for parent in _get_work_items_in_batches(wit, ids=[str(pid) for pid in pending_parents], fields=fields):
+            serialized = _serialize_report_item(parent, email)
+            stories[serialized["id"]] = {**serialized, "tasks": pending_parents.pop(serialized["id"])}
+        for leftover in pending_parents.values():
+            orphan_items.extend(leftover)
+
+    # Um item que é filho de outro contêiner aparece aninhado, não duplicado no topo.
+    nested_ids = {task["id"] for story in stories.values() for task in story["tasks"]}
+    for story in stories.values():
+        for task in story["tasks"]:
+            if task["id"] in stories:
+                task["tasks"] = stories[task["id"]]["tasks"]
+    story_list = sorted((s for s in stories.values() if s["id"] not in nested_ids), key=lambda story: story["id"])
+
+    def count_leaves(entries: list[dict[str, Any]]) -> int:
+        return sum(count_leaves(entry["tasks"]) if "tasks" in entry else 1 for entry in entries)
+
+    task_total = sum(count_leaves(story["tasks"]) for story in story_list) + len(orphan_items)
+    return {
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "project": get_project(),
+        "user_email": email,
+        "sprint_context": sprint,
+        "criteria": "Itens da sprint atribuídos ao usuário ou cuja última alteração foi feita por ele.",
+        "counts": {"stories": len(story_list), "tasks": task_total, "orphan_items": len(orphan_items)},
+        "stories": story_list,
+        "orphan_items": orphan_items,
+    }
+
+
+def _get_sprint_work_report(sprint_path: str | None = None, email: str | None = None) -> str:
+    resolved = email or _resolve_active_user_email()
+    if not resolved:
+        return "Email nao configurado. Configure AZURE_USER_EMAIL no .env ou git config --global user.email seu@email.com"
+    return _format_json(_build_sprint_work_report(resolved, sprint_path=sprint_path))
+
+
 def _get_user_stories(email: str) -> str:
     """Busca historias atribuidas ao email no Azure DevOps."""
     connection = get_client()

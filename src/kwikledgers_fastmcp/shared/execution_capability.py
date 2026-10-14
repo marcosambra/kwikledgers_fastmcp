@@ -13,11 +13,11 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import hmac
 import json
 import os
 import re
 import sqlite3
+import stat
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +26,7 @@ from typing import Any
 
 EXECUTION_CAPABILITY_KEY_ENV_VAR = "KWIKLEDGERS_FASTMCP_EXECUTION_KEY"
 EXECUTION_CAPABILITY_LEDGER_ENV_VAR = "KWIKLEDGERS_FASTMCP_CAPABILITY_LEDGER"
+LOCAL_CAPABILITY_SUFFIX = "local-v1"
 DEFAULT_EXECUTION_CAPABILITY_LEDGER = (
     Path(__file__).resolve().parents[4] / "AI_Tracking/Audit/execution-capabilities.sqlite3"
 )
@@ -46,23 +47,18 @@ def verify_execution_capability(
     if not isinstance(token, str) or not token or len(token) > 16384:
         raise ExecutionCapabilityError("A capability de execução emitida pelo LangGraph é obrigatória.")
 
-    signing_key = os.environ.get(EXECUTION_CAPABILITY_KEY_ENV_VAR, "").strip()
-    if not signing_key:
-        raise ExecutionCapabilityError("A chave de capability de execução não está configurada.")
-
     try:
         encoded_payload, signature = token.split(".", 1)
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded_payload) or not re.fullmatch(r"[0-9a-f]{64}", signature):
+        local = signature == LOCAL_CAPABILITY_SUFFIX
+        if not local or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded_payload):
             raise ValueError("Invalid token encoding")
         payload_bytes = base64.b64decode(_restore_padding(encoded_payload), altchars=b"-_", validate=True)
     except (ValueError, binascii.Error) as error:
         raise ExecutionCapabilityError("A capability de execução é inválida.") from error
 
-    expected_signature = hmac.new(signing_key.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected_signature):
-        raise ExecutionCapabilityError("A assinatura da capability de execução não confere.")
+    _require_local_transport()
     try:
-        payload = json.loads(payload_bytes)
+        payload = json.loads(payload_bytes, object_pairs_hook=_unique_fields)
     except (ValueError, RecursionError) as error:
         raise ExecutionCapabilityError("A capability de execução é inválida.") from error
     required_fields = (
@@ -73,13 +69,21 @@ def verify_execution_capability(
         for field in required_fields
     ):
         raise ExecutionCapabilityError("A capability de execução não informa campos válidos.")
+    if local and (set(payload) != set(required_fields) | {"version", "action"}
+                  or type(payload.get("version")) is not int or payload["version"] != 1
+                  or not isinstance(payload.get("action"), str) or not payload["action"].strip()):
+        raise ExecutionCapabilityError("O contrato da capability local é inválido.")
     if not re.fullmatch(r"[0-9a-f]{64}", payload["payload_digest"]) or not re.fullmatch(
         r"[0-9a-f]{32}", payload["nonce"]
     ):
         raise ExecutionCapabilityError("O digest ou nonce da capability de execução é inválido.")
     if payload.get("capability") != capability_name:
         raise ExecutionCapabilityError("A capability de execução não autoriza esta operação.")
-    if payload.get("payload_digest") != _payload_digest(arguments):
+    try:
+        arguments_digest = _payload_digest(arguments)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ExecutionCapabilityError("O payload solicitado não é JSON válido.") from error
+    if payload.get("payload_digest") != arguments_digest:
         raise ExecutionCapabilityError("A capability de execução não corresponde ao payload solicitado.")
     issued_at = _parse_expiration(payload["issued_at"])
     expires_at = _parse_expiration(payload["expires_at"])
@@ -90,12 +94,35 @@ def verify_execution_capability(
         raise ExecutionCapabilityError("A capability de execução foi emitida no futuro.")
     if expires_at <= now:
         raise ExecutionCapabilityError("A capability de execução expirou.")
-    if consume:
-        _claim_capability(payload["nonce"], expires_at)
+    if local or consume:
+        _claim_capability(payload["nonce"], expires_at, local_token=token if local else None, consume=consume)
+
+
+def _require_local_transport() -> None:
+    try:
+        from fastmcp.server.dependencies import get_http_request
+    except ImportError as error:
+        raise ExecutionCapabilityError("Não foi possível verificar o transporte local.") from error
+    try:
+        get_http_request()
+    except RuntimeError as error:
+        if str(error) == "No active HTTP request found.":
+            return
+        raise ExecutionCapabilityError("Não foi possível verificar o transporte local.") from error
+    raise ExecutionCapabilityError("Capabilities locais sem assinatura não são aceitas por HTTP.")
+
+
+def _unique_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate capability field")
+        result[key] = value
+    return result
 
 
 def _payload_digest(arguments: dict[str, Any]) -> str:
-    serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
@@ -115,14 +142,15 @@ def _parse_expiration(value: Any) -> datetime:
         raise ExecutionCapabilityError("A data da capability de execução é inválida ou não possui fuso.") from error
 
 
-def _claim_capability(nonce: str, expires_at: datetime) -> None:
+def _claim_capability(nonce: str, expires_at: datetime, *, local_token: str | None = None,
+                      consume: bool = True) -> None:
     configured_path = os.environ.get(EXECUTION_CAPABILITY_LEDGER_ENV_VAR)
     if configured_path is not None and (not configured_path.strip() or configured_path == ":memory:"):
         raise ExecutionCapabilityError("O ledger de capabilities deve ser persistente.")
     ledger_path = Path(configured_path) if configured_path is not None else DEFAULT_EXECUTION_CAPABILITY_LEDGER
     nonce_digest = hashlib.sha256(nonce.encode("ascii")).hexdigest()
     try:
-        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        _prepare_capability_ledger(ledger_path, create=local_token is None)
         with closing(sqlite3.connect(str(ledger_path), timeout=5)) as connection:
             connection.execute("PRAGMA synchronous = FULL")
             with connection:
@@ -130,6 +158,15 @@ def _claim_capability(nonce: str, expires_at: datetime) -> None:
                 now = datetime.now(timezone.utc)
                 if expires_at <= now:
                     raise ExecutionCapabilityError("A capability de execução expirou.")
+                if local_token is not None:
+                    issued = connection.execute(
+                        "SELECT nonce_digest, expires_at FROM local_execution_capabilities WHERE token_digest = ?",
+                        (hashlib.sha256(local_token.encode("ascii")).hexdigest(),),
+                    ).fetchone()
+                    if issued != (nonce_digest, expires_at.timestamp()):
+                        raise ExecutionCapabilityError("A capability local não possui registro de emissão válido.")
+                    if not consume:
+                        return
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS execution_capabilities "
                     "(nonce_digest TEXT PRIMARY KEY, expires_at REAL NOT NULL)"
@@ -143,3 +180,46 @@ def _claim_capability(nonce: str, expires_at: datetime) -> None:
         raise ExecutionCapabilityError("A capability de execução já foi consumida.") from error
     except (OSError, sqlite3.Error, ValueError) as error:
         raise ExecutionCapabilityError("Não foi possível consumir a capability de execução com segurança.") from error
+
+
+def _prepare_capability_ledger(path: Path, *, create: bool = True) -> None:
+    parent = path.absolute().parent
+    owner = os.getuid()
+    for directory in (*reversed(parent.parents), parent):
+        if create:
+            directory.mkdir(mode=0o700, exist_ok=True)
+        metadata = directory.lstat()
+        trusted_sticky = directory != parent and metadata.st_uid == 0 and metadata.st_mode & stat.S_ISVTX
+        if (not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid not in (0, owner)
+                or (directory == parent and metadata.st_uid != owner)
+                or (metadata.st_mode & 0o022 and not trusted_sticky)):
+            raise ValueError("Capability ledger requires owner-controlled local directories")
+    for suffix in ("-journal", "-wal", "-shm"):
+        try:
+            metadata = path.with_name(path.name + suffix).lstat()
+        except FileNotFoundError:
+            continue
+        _validate_capability_ledger_file(metadata)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            raise
+    else:
+        _validate_capability_ledger_file(metadata)
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+    if create:
+        flags |= os.O_CREAT
+    handle = os.open(path, flags, 0o600)
+    try:
+        _validate_capability_ledger_file(os.fstat(handle))
+        os.fchmod(handle, 0o600)
+    finally:
+        os.close(handle)
+
+
+def _validate_capability_ledger_file(metadata: os.stat_result) -> None:
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o022 or metadata.st_nlink != 1):
+        raise ValueError("Capability ledger requires an owner-controlled local file")
