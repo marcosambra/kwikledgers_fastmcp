@@ -11,7 +11,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-python_command="${1:-python3.10}"
+python_command="${1:-python3.12}"
 existing_python="$project_dir/.venv/bin/python"
 ca_bundle="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 
@@ -50,6 +50,10 @@ if ! command -v "$python_command" >/dev/null 2>&1; then
 fi
 
 export SSL_CERT_FILE="$ca_bundle"
+if ! "$python_command" -c 'import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] < (4, 0) else 1)'; then
+    printf 'Python >=3.12,<4.0 is required.\n' >&2
+    exit 1
+fi
 export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$ca_bundle}"
 export CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-$ca_bundle}"
 export POETRY_VIRTUALENVS_CREATE=true

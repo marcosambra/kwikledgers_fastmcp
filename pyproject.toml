@@ -3,7 +3,7 @@ name = "kwikledgers-fastmcp"
 version = "0.1.0"
 description = "FastMCP integration runtime scaffold for KwikLedgers."
 readme = "README.md"
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.12,<4.0"
 authors = [
     { name = "KwikLedgers", email = "dev@kwikledgers.com" }
 ]
@@ -21,7 +21,7 @@ kwikledgers-fastmcp = "kwikledgers_fastmcp.server:main"
 packages = [{ include = "kwikledgers_fastmcp", from = "src" }]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<4.0"
+python = ">=3.12,<4.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
