@@ -36,6 +36,25 @@ def item(work_item_id: int, title: str, kind: str = "User Story", state: str = "
 
 
 class NativeServiceTests(unittest.TestCase):
+    def test_daily_summary_tasks_preserve_effort_and_missing_values(self) -> None:
+        self.items[2].fields.update({"Microsoft.VSTS.Scheduling.CompletedWork": 3,
+                                     "Microsoft.VSTS.Scheduling.OriginalEstimate": 8,
+                                     "Microsoft.VSTS.Scheduling.RemainingWork": 5})
+        self.items[1].fields.pop("Microsoft.VSTS.Scheduling.RemainingWork", None)
+        assigned = services._query_assigned_items("dev@example.test")
+        task = next(entry for entry in assigned if entry["id"] == 2)
+        self.assertEqual((task["completed_work_hours"], task["original_estimate_hours"], task["remaining_work_hours"]), (3, 8, 5))
+        missing = next(entry for entry in assigned if entry["id"] == 1)
+        self.assertIsNone(missing["completed_work_hours"])
+        self.assertIsNone(missing["remaining_work_hours"])
+        self.items[1].relations = [SimpleNamespace(rel="System.LinkTypes.Hierarchy-Forward", url="https://example.test/wit/2")]
+        children = services._query_child_items_summary([{"id": 1, "title": "Story"}])
+        child = children["children_by_parent"][0]["children"][0]
+        self.assertEqual((child["completed_work_hours"], child["original_estimate_hours"], child["remaining_work_hours"]), (3, 8, 5))
+        requested = self.wit.get_work_items.call_args.kwargs["fields"]
+        self.assertIn("Microsoft.VSTS.Scheduling.CompletedWork", requested)
+        self.assertIn("Microsoft.VSTS.Scheduling.OriginalEstimate", requested)
+
     def test_incomplete_work_item_fields_fail_without_fabricated_summary(self) -> None:
         self.wit.get_work_items.side_effect = lambda ids, fields=None: [SimpleNamespace(id=1, fields=None)]
         with self.assertRaisesRegex(RuntimeError, "sem campos válidos"):
@@ -696,8 +715,12 @@ class NativeServiceTests(unittest.TestCase):
                 except json.JSONDecodeError:
                     return {"message": value}
             if isinstance(value, dict):
-                return {key: normalize(child) if isinstance(child, (dict, list)) else child
+                normalized = {key: normalize(child) if isinstance(child, (dict, list)) else child
                         for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "context_persistence", "similarity_analysis_owner", "recommended_story_status_transition", "available_sprints", "branch_sprint_path", "branch_story_id"}}
+                if "id" in value and "remaining_work_hours" in value and "work_item_type" in value:
+                    normalized.setdefault("completed_work_hours", None)
+                    normalized.setdefault("original_estimate_hours", None)
+                return normalized
             if isinstance(value, list):
                 return [normalize(child) for child in value]
             return value

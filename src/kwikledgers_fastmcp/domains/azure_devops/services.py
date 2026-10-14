@@ -2145,7 +2145,8 @@ def _query_assigned_items(email: str, sprint_path: str | None = None) -> list[di
     items = _get_work_items_in_batches(wit, ids=ids, fields=[
         "System.Id", "System.Title", "System.State", "System.WorkItemType",
         "System.IterationPath", "System.ChangedDate", "System.Tags",
-        "Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.RemainingWork"
+        "Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.RemainingWork",
+        "Microsoft.VSTS.Scheduling.CompletedWork", "Microsoft.VSTS.Scheduling.OriginalEstimate"
     ])
 
     serialized_items: list[dict[str, Any]] = []
@@ -2159,7 +2160,9 @@ def _query_assigned_items(email: str, sprint_path: str | None = None) -> list[di
             "iteration_path": fields.get("System.IterationPath"),
             "changed_at": str(fields.get("System.ChangedDate", "")),
             "story_points": fields.get("Microsoft.VSTS.Scheduling.StoryPoints") or 0,
-            "remaining_work_hours": fields.get("Microsoft.VSTS.Scheduling.RemainingWork") or 0,
+            "remaining_work_hours": fields.get("Microsoft.VSTS.Scheduling.RemainingWork"),
+            "completed_work_hours": fields.get("Microsoft.VSTS.Scheduling.CompletedWork"),
+            "original_estimate_hours": fields.get("Microsoft.VSTS.Scheduling.OriginalEstimate"),
             "tags": fields.get("System.Tags", ""),
             "is_blocked": _is_blocked_item(fields),
         })
@@ -2249,7 +2252,8 @@ def _query_child_items_summary(parent_items: list[dict[str, Any]]) -> dict[str, 
     child_items = _get_work_items_in_batches(wit, ids=[str(child_id) for child_id in unique_child_ids], fields=[
         "System.Id", "System.Title", "System.State", "System.WorkItemType",
         "System.IterationPath", "System.ChangedDate", "System.Tags",
-        "Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.RemainingWork"
+        "Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.RemainingWork",
+        "Microsoft.VSTS.Scheduling.CompletedWork", "Microsoft.VSTS.Scheduling.OriginalEstimate"
     ])
 
     serialized_children: dict[int, dict[str, Any]] = {}
@@ -2265,7 +2269,9 @@ def _query_child_items_summary(parent_items: list[dict[str, Any]]) -> dict[str, 
             "iteration_path": fields.get("System.IterationPath"),
             "changed_at": str(fields.get("System.ChangedDate", "")),
             "story_points": fields.get("Microsoft.VSTS.Scheduling.StoryPoints") or 0,
-            "remaining_work_hours": fields.get("Microsoft.VSTS.Scheduling.RemainingWork") or 0,
+            "remaining_work_hours": fields.get("Microsoft.VSTS.Scheduling.RemainingWork"),
+            "completed_work_hours": fields.get("Microsoft.VSTS.Scheduling.CompletedWork"),
+            "original_estimate_hours": fields.get("Microsoft.VSTS.Scheduling.OriginalEstimate"),
             "tags": fields.get("System.Tags", ""),
             "is_blocked": _is_blocked_item(fields),
             "is_completed": _is_completed_state(state),

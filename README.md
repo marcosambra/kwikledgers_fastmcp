@@ -16,6 +16,11 @@ This directory now exposes the FastMCP capability transport for Azure DevOps, lo
 FastMCP is the integration facade.
 LangGraph is the workflow engine.
 
+Daily summaries include `original_estimate_hours`, `completed_work_hours` and
+`remaining_work_hours` for assigned items and linked children. Missing effort
+fields remain null rather than implying zero remaining work. Story percentages
+and charts are computed by the consumer, not by FastMCP workflows.
+
 That means:
 
 - FastMCP exposes capabilities;
