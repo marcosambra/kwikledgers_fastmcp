@@ -23,10 +23,10 @@ from kwikledgers_fastmcp.server import (
     build_tracking_sync_adapter,
     get_my_daily_summary,
 )
-from kwikledgers_fastmcp.shared.legacy_gateway import (
+from kwikledgers_fastmcp.shared.capability_gateway import (
     CAPABILITY_CATALOG,
     CapabilityDefinition,
-    invoke_legacy_capability,
+    invoke_capability,
 )
 
 
@@ -81,13 +81,13 @@ class FastMcpServerTestCase(unittest.TestCase):
         self.assertEqual(result["counts"]["assigned_items"], 3)
 
 
-class LegacyGatewayTestCase(unittest.TestCase):
+class CapabilityGatewayTestCase(unittest.TestCase):
     def test_active_user_uses_native_dispatch(self) -> None:
         definition = CapabilityDefinition("get_active_user", "azure_devops", "read", "test")
 
         with patch("kwikledgers_fastmcp.domains.azure_devops.read_services.load_configuration"):
             with patch.dict(os.environ, {"AZURE_USER_EMAIL": "dev.user@example.com", "AZURE_USER_NAME": "Dev User"}):
-                result = asyncio.run(invoke_legacy_capability(definition))
+                result = asyncio.run(invoke_capability(definition))
 
         self.assertEqual(result["data"], {"message": "Usuario ativo: Dev User <dev.user@example.com>"})
 
@@ -101,7 +101,7 @@ class LegacyGatewayTestCase(unittest.TestCase):
             with patch.dict(os.environ, {
                 "KWIKLEDGERS_ENV_FILE": str(environment_path),
             }, clear=True):
-                result = asyncio.run(invoke_legacy_capability(definition))
+                result = asyncio.run(invoke_capability(definition))
 
         self.assertEqual(result["data"], {"message": "Usuario ativo: Dev User <dev.user@example.com>"})
 
@@ -114,7 +114,7 @@ class LegacyGatewayTestCase(unittest.TestCase):
                     types.SimpleNamespace(stdout=""),
                     types.SimpleNamespace(stdout=""),
                 ]):
-                    result = asyncio.run(invoke_legacy_capability(definition))
+                    result = asyncio.run(invoke_capability(definition))
 
         self.assertEqual(result["data"], {"message": "Usuario ativo: Dev User <dev._user@example.com>"})
 
@@ -123,13 +123,13 @@ class LegacyGatewayTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch.dict(os.environ, {"KWIKLEDGERS_ROOT_DIR": temporary_directory}, clear=True):
                 with patch("kwikledgers_fastmcp.domains.azure_devops.read_services.subprocess.run", return_value=types.SimpleNamespace(stdout="")):
-                    result = asyncio.run(invoke_legacy_capability(definition))
+                    result = asyncio.run(invoke_capability(definition))
 
         self.assertEqual(result["data"], {
             "message": "Email nao configurado. Configure AZURE_USER_EMAIL no .env ou git config --global user.email seu@email.com"
         })
 
-    def test_invoke_legacy_capability_normalizes_json_result(self) -> None:
+    def test_invoke_capability_normalizes_json_result(self) -> None:
         definition = CapabilityDefinition("get_my_daily_summary", "azure_devops", "read", "test")
 
         async def dispatch(name: str, arguments: dict[str, object]) -> str:
@@ -142,23 +142,23 @@ class LegacyGatewayTestCase(unittest.TestCase):
                 "data": {"counts": {"assigned_items": 2}},
             }
 
-        with patch("kwikledgers_fastmcp.shared.legacy_gateway.invoke_azure_capability", new=dispatch):
-            result = asyncio.run(invoke_legacy_capability(definition))
+        with patch("kwikledgers_fastmcp.shared.capability_gateway.invoke_azure_capability", new=dispatch):
+            result = asyncio.run(invoke_capability(definition))
 
         self.assertEqual(result["domain"], "azure_devops")
         self.assertEqual(result["data"]["counts"]["assigned_items"], 2)
 
-    def test_invoke_legacy_capability_rejects_workflow_fields(self) -> None:
+    def test_invoke_capability_rejects_workflow_fields(self) -> None:
         definition = CapabilityDefinition("get_my_daily_summary", "azure_devops", "read", "test")
 
         with self.assertRaises(ValueError):
-            asyncio.run(invoke_legacy_capability(definition, {"approved": True}))
+            asyncio.run(invoke_capability(definition, {"approved": True}))
 
     def test_execute_capability_requires_signed_langgraph_token(self) -> None:
         definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
 
         with self.assertRaises(RuntimeError):
-            asyncio.run(invoke_legacy_capability(definition, {"story_id": 1, "status": "Closed"}))
+            asyncio.run(invoke_capability(definition, {"story_id": 1, "status": "Closed"}))
 
     def test_execute_capability_allows_signed_matching_payload(self) -> None:
         definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
@@ -180,9 +180,9 @@ class LegacyGatewayTestCase(unittest.TestCase):
                 "KWIKLEDGERS_FASTMCP_EXECUTION_KEY": "test-key",
                 "KWIKLEDGERS_FASTMCP_CAPABILITY_LEDGER": str(Path(temporary_directory) / "ledger.sqlite3"),
             }, clear=False):
-                with patch("kwikledgers_fastmcp.shared.legacy_gateway.invoke_azure_capability", new=dispatch):
+                with patch("kwikledgers_fastmcp.shared.capability_gateway.invoke_azure_capability", new=dispatch):
                     result = asyncio.run(
-                        invoke_legacy_capability(
+                        invoke_capability(
                             definition,
                             {**arguments, "execution_capability": token},
                         )

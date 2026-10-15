@@ -81,7 +81,7 @@ def _validate_atomic_request(arguments: dict[str, Any]) -> None:
         )
 
 
-async def invoke_legacy_capability(
+async def invoke_capability(
     definition: CapabilityDefinition,
     arguments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -125,8 +125,8 @@ async def invoke_legacy_capability(
     }
 
 
-def invoke_legacy_capability_sync(
+def invoke_capability_sync(
     definition: CapabilityDefinition,
     arguments: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return asyncio.run(invoke_legacy_capability(definition, arguments))
+    return asyncio.run(invoke_capability(definition, arguments))

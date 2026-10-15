@@ -87,7 +87,6 @@ kwikledgers_fastmcp/
         errors.py
         serialization.py
       compatibility/
-        legacy_payloads.py
         feature_flags.py
   tests/
     contract/
@@ -148,15 +147,12 @@ LangGraph should own:
 
 ## Compatibility Seams
 
-- Transport seam: legacy `mcp.server.Server` can coexist with FastMCP during rollout.
 - Contract seam: payload shapes stay stable first, then are simplified only after LangGraph adapters switch over.
-- Adapter seam: `kwikledgers_langgraph/` can choose `legacy` or `fastmcp` backends.
+- Adapter seam: `kwikledgers_langgraph/` consumes this server as its only backend.
 - Rollout seam: feature flags per domain and per capability.
-- Observability seam: keep `AI_Tracking` and audit output consistent enough to compare both runtimes.
 
 ## Current Migration Boundary
 
-- no deletion of `agent/mcp_servers/`;
 - no reimplementation of mutable flows inside MCP;
 - no change to the current approval-first operational contract.
 - no workflow rule, approval policy, or resumable state inside FastMCP handlers.
@@ -173,7 +169,6 @@ See `ROADMAP.md` in this directory for the recommended migration order, slices, 
 - `tests/test_server.py` validates o registry, o envelope de capabilities e o dispatcher nativo.
 
 As 30 capabilities registradas são atendidas por serviços FastMCP nativos. O
-LangGraph seleciona `fastmcp` por padrão; `legacy` continua disponível somente
-como rollback explícito durante a janela operacional de observação.
+LangGraph usa `fastmcp` como único backend.
 
 The ownership and parity map is maintained in [docs/ownership-parity-matrix.md](docs/ownership-parity-matrix.md).

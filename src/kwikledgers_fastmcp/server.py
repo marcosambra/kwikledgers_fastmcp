@@ -8,10 +8,10 @@ from fastmcp import FastMCP
 from kwikledgers_fastmcp.domains.azure_devops import FastMcpDailySummaryProvider
 from kwikledgers_fastmcp.domains.local_tracking import FastMcpTrackingSyncAdapter
 from kwikledgers_fastmcp.domains.windows import FastMcpNotificationAdapter
-from kwikledgers_fastmcp.shared.legacy_gateway import (
+from kwikledgers_fastmcp.shared.capability_gateway import (
     CAPABILITY_CATALOG,
     CapabilityDefinition,
-    invoke_legacy_capability,
+    invoke_capability,
 )
 
 
@@ -70,7 +70,7 @@ def build_fastmcp_server() -> FastMCP:
 
 def _build_capability_handler(definition: CapabilityDefinition) -> Any:
     async def capability_handler(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await invoke_legacy_capability(definition, arguments)
+        return await invoke_capability(definition, arguments)
 
     capability_handler.__name__ = definition.name
     capability_handler.__doc__ = definition.description

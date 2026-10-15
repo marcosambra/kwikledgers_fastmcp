@@ -221,31 +221,31 @@ class ExecutionCapabilityTestCase(unittest.TestCase):
         write.assert_called_once_with()
 
     def test_local_gateway_dispatches_exact_arguments_once(self) -> None:
-        from kwikledgers_fastmcp.shared.legacy_gateway import CapabilityDefinition, invoke_legacy_capability
+        from kwikledgers_fastmcp.shared.capability_gateway import CapabilityDefinition, invoke_capability
 
         token = self._local_token()
         definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
         dispatch = AsyncMock(return_value={"status": "updated"})
         with patch.dict(os.environ, {EXECUTION_CAPABILITY_KEY_ENV_VAR: ""}), patch(
-            "kwikledgers_fastmcp.shared.legacy_gateway.invoke_azure_capability", new=dispatch,
+            "kwikledgers_fastmcp.shared.capability_gateway.invoke_azure_capability", new=dispatch,
         ):
-            result = asyncio.run(invoke_legacy_capability(definition, {**self.arguments, "execution_capability": token}))
+            result = asyncio.run(invoke_capability(definition, {**self.arguments, "execution_capability": token}))
             self.assertEqual(result["data"], {"status": "updated"})
             with self.assertRaisesRegex(ExecutionCapabilityError, "já foi consumida"):
-                asyncio.run(invoke_legacy_capability(definition, {**self.arguments, "execution_capability": token}))
+                asyncio.run(invoke_capability(definition, {**self.arguments, "execution_capability": token}))
         dispatch.assert_awaited_once_with("update_story_status", self.arguments)
 
     def test_local_gateway_blocks_http_before_dispatch(self) -> None:
-        from kwikledgers_fastmcp.shared.legacy_gateway import CapabilityDefinition, invoke_legacy_capability
+        from kwikledgers_fastmcp.shared.capability_gateway import CapabilityDefinition, invoke_capability
 
         token = self._local_token()
         definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
         dispatch = AsyncMock()
         with patch.dict(os.environ, {EXECUTION_CAPABILITY_KEY_ENV_VAR: ""}), patch(
             "fastmcp.server.dependencies.get_http_request", return_value=object(),
-        ), patch("kwikledgers_fastmcp.shared.legacy_gateway.invoke_azure_capability", new=dispatch):
+        ), patch("kwikledgers_fastmcp.shared.capability_gateway.invoke_azure_capability", new=dispatch):
             with self.assertRaisesRegex(ExecutionCapabilityError, "HTTP"):
-                asyncio.run(invoke_legacy_capability(definition, {**self.arguments, "execution_capability": token}))
+                asyncio.run(invoke_capability(definition, {**self.arguments, "execution_capability": token}))
         dispatch.assert_not_awaited()
 
     def test_valid_token_is_consumed_and_replay_is_rejected(self) -> None:
