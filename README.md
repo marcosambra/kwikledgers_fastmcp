@@ -21,6 +21,13 @@ Daily summaries include `original_estimate_hours`, `completed_work_hours` and
 fields remain null rather than implying zero remaining work. Story percentages
 and charts are computed by the consumer, not by FastMCP workflows.
 
+`get_story_details` includes a read-only `hierarchy_context`, following parent
+links from the requested task or story through Feature and Epic. Ancestors
+retain title, state, description, acceptance criteria and revision. Missing
+levels, invalid or ambiguous links, cycles and unavailable ancestors are
+reported explicitly; `complete` does not imply that missing product content
+has been inferred. Traversal is limited to 16 ancestors and never changes links.
+
 That means:
 
 - FastMCP exposes capabilities;

@@ -2116,11 +2116,21 @@ def _serialize_assigned_to(value: IdentityRef | dict[str, object] | str | None) 
     return raw_value or "Nao atribuido"
 
 
-def _query_assigned_items(email: str, sprint_path: str | None = None) -> list[dict[str, Any]]:
+def _query_assigned_items(email: str, sprint_path: str | None = None, *, in_progress_only: bool = False) -> list[dict[str, Any]]:
     connection = get_client()
     wit = connection.clients.get_work_item_tracking_client()
     escaped_email = email.replace("'", "''")
     iteration = "'{}'".format(sprint_path.replace("'", "''")) if sprint_path else "@CurrentIteration"
+    scope = f"""[System.IterationPath] = {iteration}
+                    AND (
+                                [System.WorkItemType] = 'Task'
+                                OR [System.State] NOT IN {ACTIVE_DAILY_SUMMARY_EXCLUDED_STATES}
+                    )"""
+    if in_progress_only:
+        project = get_project().replace("'", "''")
+        scope = f"""[System.TeamProject] = '{project}'
+                    AND [System.WorkItemType] IN ('User Story', 'Story', 'History', 'Spike', 'Technical Debt', 'Bug', 'Task')
+          AND [System.State] IN ('Desenvolvimento', 'Active', 'In Progress', 'Em andamento')"""
 
     query = Wiql(query=f"""
         SELECT [System.Id], [System.Title], [System.State], [System.WorkItemType],
@@ -2129,11 +2139,7 @@ def _query_assigned_items(email: str, sprint_path: str | None = None) -> list[di
                [System.Tags]
         FROM WorkItems
         WHERE [System.AssignedTo] = '{escaped_email}'
-          AND [System.IterationPath] = {iteration}
-                    AND (
-                                [System.WorkItemType] = 'Task'
-                                OR [System.State] NOT IN {ACTIVE_DAILY_SUMMARY_EXCLUDED_STATES}
-                    )
+                    AND {scope}
         ORDER BY [System.ChangedDate] DESC
     """)
 
@@ -2511,8 +2517,8 @@ def _build_daily_summary(email: str, sprint_path: str | None = None, story_id: i
         if isinstance(story_id, bool) or not isinstance(story_id, int) or story_id <= 0:
             raise ValueError("O ID da história da branch deve ser um inteiro positivo.")
         snapshot = _get_work_item_snapshot(get_client().clients.get_work_item_tracking_client(), story_id)
-        if str(snapshot.get("work_item_type") or "").lower() not in {"user story", "history", "história"}:
-            raise ValueError("O item identificado na branch não é uma história.")
+        if str(snapshot.get("work_item_type") or "").lower() not in {"user story", "story", "history", "história", "spike", "technical debt", "bug"}:
+            raise ValueError("O item identificado na branch não é uma história (Story, Spike, Technical Debt ou Bug).")
         branch_sprint_path = snapshot.get("iteration_path")
         if not branch_sprint_path:
             raise ValueError("A história da branch não possui uma sprint associada.")
@@ -2523,6 +2529,8 @@ def _build_daily_summary(email: str, sprint_path: str | None = None, story_id: i
     resolved_email, email_source, env_file_path = _resolve_active_user_identity()
     user_name = _resolve_active_user_name(email)
     items = _query_assigned_items(email, sprint_path=sprint_context.get("path"))
+    assigned_in_progress_items = _query_assigned_items(email, in_progress_only=True)
+    assigned_in_progress_children = _query_child_items_summary(assigned_in_progress_items)
     blocked_items = [item for item in items if item["is_blocked"]]
     story_items = [item for item in items if _is_story_type(item.get("work_item_type"))]
     task_items = [item for item in items if _is_task_type(item.get("work_item_type"))]
@@ -2591,6 +2599,8 @@ def _build_daily_summary(email: str, sprint_path: str | None = None, story_id: i
         "child_items_summary": child_items_summary,
         "sprint_stories": sprint_stories,
         "items": items,
+        "assigned_in_progress_items": assigned_in_progress_items,
+        "assigned_in_progress_children": assigned_in_progress_children,
         "blocked_items": blocked_items,
         "open_prs": open_prs,
     }
@@ -2812,6 +2822,65 @@ def _get_sprint_stories_detailed() -> str:
     )
 
 
+def _build_hierarchy_context(wit: WorkItemTrackingClient, item: WorkItem) -> dict[str, Any]:
+    ancestors: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    fields = _work_item_fields(item)
+    source_type = str(fields.get("System.WorkItemType") or "").lower()
+    source_id = int(fields.get("System.Id") or item.id)
+    visited = {source_id}
+    current = item
+    for _ in range(16):
+        if str(_work_item_fields(current).get("System.WorkItemType") or "").lower() == "epic":
+            break
+        parent_ids: set[int] = set()
+        for relation in getattr(current, "relations", None) or []:
+            if getattr(relation, "rel", "") != "System.LinkTypes.Hierarchy-Reverse":
+                continue
+            raw_id = str(getattr(relation, "url", "")).rstrip("/").rsplit("/", 1)[-1]
+            if not raw_id.isdigit() or int(raw_id) <= 0:
+                issues.append({"code": "invalid_parent_link"})
+            else:
+                parent_ids.add(int(raw_id))
+        if issues or not parent_ids:
+            break
+        if len(parent_ids) != 1:
+            issues.append({"code": "ambiguous_parent", "ids": sorted(parent_ids)})
+            break
+        parent_id = next(iter(parent_ids))
+        if parent_id in visited:
+            issues.append({"code": "hierarchy_cycle", "id": parent_id})
+            break
+        visited.add(parent_id)
+        try:
+            parent = wit.get_work_item(id=parent_id, expand="Relations")
+            parent_fields = _work_item_fields(parent)
+            if int(parent_fields.get("System.Id") or parent.id) != parent_id:
+                raise ValueError("Ancestor identity mismatch")
+        except Exception as exc:
+            issues.append({"code": "ancestor_unavailable", "id": parent_id, "error_type": type(exc).__name__})
+            break
+        ancestors.append({
+            "id": parent_id, "revision": getattr(parent, "rev", None),
+            "title": parent_fields.get("System.Title"), "state": parent_fields.get("System.State"),
+            "work_item_type": parent_fields.get("System.WorkItemType"),
+            "description": parent_fields.get("System.Description"),
+            "acceptance_criteria": parent_fields.get("Microsoft.VSTS.Common.AcceptanceCriteria"),
+            "iteration_path": parent_fields.get("System.IterationPath"),
+            "url": _build_browser_work_item_url(parent_id),
+        })
+        current = parent
+    else:
+        if str(_work_item_fields(current).get("System.WorkItemType") or "").lower() != "epic":
+            issues.append({"code": "hierarchy_depth_limit"})
+    types = {source_type, *(str(parent.get("work_item_type") or "").lower() for parent in ancestors)}
+    missing_levels = [kind for kind in ("Feature", "Epic") if kind.lower() not in types]
+    if source_type == "task" and not types.intersection({"user story", "story", "history", "spike", "technical debt", "bug"}):
+        missing_levels.insert(0, "Story")
+    return {"source_id": source_id, "ancestors": ancestors,
+            "missing_levels": missing_levels, "issues": issues, "complete": not missing_levels and not issues}
+
+
 def _get_story_details(story_id: int) -> str:
     """Retorna detalhes completos da historia incluindo criterios de aceite e tasks."""
     connection = get_client()
@@ -2822,11 +2891,12 @@ def _get_story_details(story_id: int) -> str:
     fields = _work_item_fields(item)
     assigned = fields.get("System.AssignedTo") or {}
     assigned_email = assigned.get("uniqueName") if isinstance(assigned, dict) else getattr(assigned, "unique_name", None)
-    parent_ids = [
-        int(str(relation.url).rstrip("/").rsplit("/", 1)[-1])
-        for relation in getattr(item, "relations", None) or []
-        if getattr(relation, "rel", None) == "System.LinkTypes.Hierarchy-Reverse"
-    ]
+    parent_ids: set[int] = set()
+    for relation in getattr(item, "relations", None) or []:
+        if getattr(relation, "rel", None) == "System.LinkTypes.Hierarchy-Reverse":
+            raw_id = str(getattr(relation, "url", "")).rstrip("/").rsplit("/", 1)[-1]
+            if raw_id.isdigit() and int(raw_id) > 0:
+                parent_ids.add(int(raw_id))
     children: list[dict[str, Any]] = []
     lines = [
         f"=== KL-{story_id}: {fields['System.Title']} ===",
@@ -2871,12 +2941,13 @@ def _get_story_details(story_id: int) -> str:
         "story_id": story_id,
         "assigned_to_email": assigned_email,
         "activated_at": str(fields.get("Microsoft.VSTS.Common.ActivatedDate") or "") or None,
-        "parent_id": parent_ids[0] if len(parent_ids) == 1 else None,
+        "parent_id": next(iter(parent_ids)) if len(parent_ids) == 1 else None,
         "description": fields.get("System.Description"),
         "acceptance_criteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria"),
         "priority": fields.get("Microsoft.VSTS.Common.Priority"),
         "tags": fields.get("System.Tags"),
         "child_work_items": children,
+        "hierarchy_context": _build_hierarchy_context(wit, item),
         "message": "\n".join(lines),
     })
 

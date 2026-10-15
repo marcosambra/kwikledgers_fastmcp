@@ -93,7 +93,7 @@ class ExecutionCapabilityTestCase(unittest.TestCase):
                 connection.execute("INSERT INTO local_execution_capabilities VALUES (?, ?, ?)", (
                     hashlib.sha256(token.encode("ascii")).hexdigest(),
                     hashlib.sha256(payload["nonce"].encode("ascii")).hexdigest(),
-                    datetime.fromisoformat(payload["expires_at"].replace("Z", "+00:00")).timestamp(),
+                    datetime.fromisoformat(payload["expires_at"]).timestamp(),
                 ))
         return token
 
@@ -399,7 +399,7 @@ class ExecutionCapabilityTestCase(unittest.TestCase):
         with patch("kwikledgers_fastmcp.shared.execution_capability.sqlite3.connect", side_effect=sqlite3.OperationalError("locked")):
             with self.assertRaises(ExecutionCapabilityError):
                 self._verify(token)
-        self._verify(token)
+            self._verify(token)
 
     def test_expiry_is_rechecked_inside_claim(self) -> None:
         token = self._local_token()

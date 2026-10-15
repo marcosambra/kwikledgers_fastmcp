@@ -39,7 +39,6 @@ AZURE_CAPABILITIES = (
     CapabilityDefinition("get_sprint_stories", "azure_devops", "read", "Lista histórias do sprint atual."),
     CapabilityDefinition("get_sprint_stories_detailed", "azure_devops", "read", "Lista histórias detalhadas do sprint atual."),
     CapabilityDefinition("get_story_details", "azure_devops", "read", "Retorna detalhes de uma história."),
-    CapabilityDefinition("get_sprint_work_report", "azure_devops", "read", "Lista histórias e tasks da sprint trabalhadas pelo usuário, agrupadas por história."),
     CapabilityDefinition("get_open_prs", "azure_devops", "read", "Lista PRs abertas de um usuário."),
     CapabilityDefinition("preview_story_branch_association", "azure_devops", "preview", "Gera preview técnico de associação de branch."),
     CapabilityDefinition("preview_story_pull_request", "azure_devops", "preview", "Gera preview técnico de PR Draft."),

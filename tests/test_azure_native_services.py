@@ -36,6 +36,34 @@ def item(work_item_id: int, title: str, kind: str = "User Story", state: str = "
 
 
 class NativeServiceTests(unittest.TestCase):
+    def test_summary_keeps_personal_other_sprint_story_separate_from_sprint_totals(self) -> None:
+        current = services._query_assigned_items("dev@example.test")
+        other = {**current[0], "id": 129245, "work_item_type": "Bug", "state": "Desenvolvimento", "iteration_path": "Project\\2026\\Sprint 19"}
+        self.items[129245] = item(129245, "Other sprint bug", kind="Bug", state="Desenvolvimento")
+        self.items[129245].relations = self.items[1].relations
+        with patch.object(services, "_query_assigned_items", side_effect=[current, [other]]):
+            payload = self.invoke("get_my_daily_summary")
+        self.assertEqual(payload["items"], current)
+        self.assertEqual(payload["counts"]["assigned_items"], len(current))
+        self.assertEqual(payload["remaining_work_hours"], sum(entry["remaining_work_hours"] for entry in current))
+        self.assertEqual(payload["assigned_in_progress_items"], [other])
+        self.assertEqual(payload["assigned_in_progress_children"]["children_by_parent"][0]["parent_id"], 129245)
+
+    def test_personal_in_progress_query_is_not_limited_to_sprint(self) -> None:
+        services._query_assigned_items("dev'o@example.test", in_progress_only=True)
+        query = self.wit.query_by_wiql.call_args.args[0].query
+        self.assertIn("[System.AssignedTo] = 'dev''o@example.test'", query)
+        self.assertIn("[System.TeamProject] = 'Project'", query)
+        self.assertIn("'User Story'", query)
+        self.assertIn("'Task'", query)
+        self.assertIn("'Bug'", query)
+        self.assertIn("'Spike'", query)
+        self.assertIn("'Technical Debt'", query)
+        self.assertIn("'Desenvolvimento'", query)
+        self.assertIn("'Active'", query)
+        self.assertNotIn("[System.IterationPath] =", query)
+        self.assertNotIn("@CurrentIteration", query)
+
     def test_daily_summary_tasks_preserve_effort_and_missing_values(self) -> None:
         self.items[2].fields.update({"Microsoft.VSTS.Scheduling.CompletedWork": 3,
                                      "Microsoft.VSTS.Scheduling.OriginalEstimate": 8,
@@ -82,7 +110,8 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(payload["sprint_context"]["sprint_number"], 20)
         self.assertEqual(payload["branch_sprint_path"], selected_path)
         for call in self.wit.query_by_wiql.call_args_list:
-            self.assertIn(f"[System.IterationPath] = '{selected_path}'", call.args[0].query)
+            if "[System.TeamProject]" not in call.args[0].query:
+                self.assertIn(f"[System.IterationPath] = '{selected_path}'", call.args[0].query)
         self.assertFalse(self.wit.update_work_item.called)
         self.assertFalse(self.wit.create_work_item.called)
         manual_path = f"Project\\{year}\\Sustentacao\\Sprint 20 - Sustentacao"
@@ -96,6 +125,13 @@ class NativeServiceTests(unittest.TestCase):
             self.assertEqual(services._extract_sprint_number(name), 20)
         with self.assertRaises(ValueError):
             services._get_my_daily_summary(story_id=2)
+        for kind in ("User Story", "Story", "History", "Spike", "Technical Debt", "Bug"):
+            with self.subTest(parent_type=kind):
+                self.items[1].fields["System.WorkItemType"] = kind
+                parent = self.invoke("get_my_daily_summary", story_id=1, sprint_path=manual_path)
+                self.assertEqual(parent["branch_story_id"], 1)
+                self.assertEqual(parent["sprint_context"]["path"], manual_path)
+                self.assertEqual(parent["branch_sprint_path"], selected_path)
 
     def test_summary_lists_parallel_sprints_and_defaults_to_main(self) -> None:
         year = datetime.now().year
@@ -332,6 +368,52 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual((data["id"], data["revision"], data["current_status"], data["work_item_type"]), (1, 7, "Active", "User Story"))
         self.assertEqual(data["child_work_items"][0]["revision"], 7)
         self.assertEqual(data["child_work_items"][0]["work_item_type"], "Task")
+
+    def test_details_include_story_feature_and_epic_context_from_task(self) -> None:
+        self.items[5] = item(5, "Product feature", kind="Feature")
+        self.items[6] = item(6, "Product epic", kind="Epic")
+        for child_id, parent_id in ((2, 1), (1, 5), (5, 6)):
+            self.items[child_id].relations.append(SimpleNamespace(
+                rel="System.LinkTypes.Hierarchy-Reverse", url=f"https://example.test/wit/{parent_id}"))
+        data = self.invoke("get_story_details", story_id=2)
+        context = data["hierarchy_context"]
+        self.assertEqual([parent["id"] for parent in context["ancestors"]], [1, 5, 6])
+        self.assertEqual(context["ancestors"][1]["description"], "<p>Existing description.</p>")
+        self.assertEqual(context["ancestors"][2]["acceptance_criteria"], "<p>Existing criteria.</p>")
+        self.assertTrue(context["complete"])
+        self.assertEqual(context["missing_levels"], [])
+        self.wit.update_work_item.assert_not_called()
+        self.wit.create_work_item.assert_not_called()
+
+    def test_hierarchy_uses_sdk_id_when_system_id_field_is_omitted(self) -> None:
+        self.items[1].fields.pop("System.Id")
+        self.items[2].fields.pop("System.Id")
+        self.items[2].relations = [SimpleNamespace(rel="System.LinkTypes.Hierarchy-Reverse", url="https://example.test/wit/1")]
+        context = self.invoke("get_story_details", story_id=2)["hierarchy_context"]
+        self.assertEqual(context["source_id"], 2)
+        self.assertEqual(context["ancestors"][0]["id"], 1)
+
+    def test_details_report_missing_ancestors_cycles_and_unavailable_items(self) -> None:
+        context = self.invoke("get_story_details", story_id=1)["hierarchy_context"]
+        self.assertFalse(context["complete"])
+        self.assertEqual(context["missing_levels"], ["Feature", "Epic"])
+        self.items[1].relations.append(SimpleNamespace(rel="System.LinkTypes.Hierarchy-Reverse", url="https://example.test/wit/1"))
+        cycle = self.invoke("get_story_details", story_id=1)["hierarchy_context"]
+        self.assertEqual(cycle["issues"], [{"code": "hierarchy_cycle", "id": 1}])
+        self.items[1].relations[-1].url = "https://example.test/wit/999"
+        unavailable = self.invoke("get_story_details", story_id=1)["hierarchy_context"]
+        self.assertEqual(unavailable["issues"][0]["code"], "ancestor_unavailable")
+        self.assertEqual(unavailable["ancestors"], [])
+
+    def test_invalid_or_ambiguous_parent_links_are_reported_without_crashing_details(self) -> None:
+        self.items[2].relations = [SimpleNamespace(rel="System.LinkTypes.Hierarchy-Reverse", url="https://example.test/wit/not-an-id")]
+        invalid = self.invoke("get_story_details", story_id=2)
+        self.assertIsNone(invalid["parent_id"])
+        self.assertEqual(invalid["hierarchy_context"]["issues"], [{"code": "invalid_parent_link"}])
+        self.items[2].relations = [SimpleNamespace(rel="System.LinkTypes.Hierarchy-Reverse", url=f"https://example.test/wit/{parent_id}") for parent_id in (1, 3)]
+        ambiguous = self.invoke("get_story_details", story_id=2)
+        self.assertIsNone(ambiguous["parent_id"])
+        self.assertEqual(ambiguous["hierarchy_context"]["issues"], [{"code": "ambiguous_parent", "ids": [1, 3]}])
 
     def test_get_open_prs_filters_creator_and_handles_timezone(self) -> None:
         self.create_pr(SimpleNamespace(title="PR", source_ref_name="refs/heads/source", target_ref_name="refs/heads/target", is_draft=True))
@@ -716,7 +798,7 @@ class NativeServiceTests(unittest.TestCase):
                     return {"message": value}
             if isinstance(value, dict):
                 normalized = {key: normalize(child) if isinstance(child, (dict, list)) else child
-                        for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "context_persistence", "similarity_analysis_owner", "recommended_story_status_transition", "available_sprints", "branch_sprint_path", "branch_story_id"}}
+                        for key, child in value.items() if key not in {"revision", "expected_revisions", "current_status", "area_path", "context_persistence", "similarity_analysis_owner", "recommended_story_status_transition", "available_sprints", "branch_sprint_path", "branch_story_id", "assigned_in_progress_items", "assigned_in_progress_children"}}
                 if "id" in value and "remaining_work_hours" in value and "work_item_type" in value:
                     normalized.setdefault("completed_work_hours", None)
                     normalized.setdefault("original_estimate_hours", None)
