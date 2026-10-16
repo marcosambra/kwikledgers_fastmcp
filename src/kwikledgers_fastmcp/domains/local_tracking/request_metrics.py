@@ -20,6 +20,7 @@ DETAIL_FIELDS = frozenset({
     "capability", "domain", "operation", "outcome", "flow_name", "node",
     "correlation_id", "run_id", "parent_request_id", "observed_at", "measurement",
     "tool_name", "tool_call_id", "reason", "evidence", "error_type", "scope", "error",
+    "workspace_id", "session_id", "span_id", "parent_span_id",
 })
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SENSITIVE = re.compile(

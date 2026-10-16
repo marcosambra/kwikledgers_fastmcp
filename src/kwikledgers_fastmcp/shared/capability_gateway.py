@@ -13,6 +13,7 @@ from kwikledgers_fastmcp.domains.local_tracking.services import invoke_tracking_
 from kwikledgers_fastmcp.domains.local_tracking.request_metrics import RequestMetricsService, _identifier
 from kwikledgers_fastmcp.domains.windows.services import invoke_windows_capability
 from kwikledgers_fastmcp.shared.execution_capability import verify_execution_capability
+from kwikledgers_fastmcp.shared.operational_context import current_operational_context
 
 
 FORBIDDEN_WORKFLOW_FIELDS = {
@@ -94,7 +95,8 @@ async def invoke_capability(
     if definition.name in {"record_request_event", "read_request_metrics"}:
         return await _invoke_capability(definition, arguments, {})
     # Correlation is explicit process context, never inferred from a session/token.
-    contextual_request = os.environ.get("KWIKLEDGERS_REQUEST_ID")
+    context = current_operational_context()
+    contextual_request = context.request_id if context else None
     request_id = contextual_request or str(uuid4())
     _identifier(request_id, "KWIKLEDGERS_REQUEST_ID")
     metrics = RequestMetricsService()
@@ -106,6 +108,12 @@ async def invoke_capability(
         "capability": definition.name, "domain": definition.domain,
         "operation": definition.operation,
     }
+    if context:
+        metadata.update({
+            field: getattr(context, field)
+            for field in ("workspace_id", "run_id", "span_id", "parent_span_id")
+            if getattr(context, field)
+        })
     if not contextual_request:
         try:
             await asyncio.to_thread(

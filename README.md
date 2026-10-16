@@ -16,6 +16,13 @@ This directory now exposes the FastMCP capability transport for Azure DevOps, lo
 FastMCP is the integration facade.
 LangGraph is the workflow engine.
 
+Operational correlation uses version `1` of `kwikledgers/context` in MCP
+`_meta`, separate from business arguments and execution capabilities.
+`request_id` is required; workspace, session, run and parent/child span IDs are
+optional safe identifiers. The server binds metadata to the individual async
+request, not the process environment, so concurrent HTTP callers cannot share
+another caller's context. Metadata never authorizes an operation.
+
 Daily summaries include `original_estimate_hours`, `completed_work_hours` and
 `remaining_work_hours` for assigned items and linked children. Missing effort
 fields remain null rather than implying zero remaining work. Story percentages

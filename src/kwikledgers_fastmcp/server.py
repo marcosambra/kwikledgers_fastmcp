@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 
 from kwikledgers_fastmcp.domains.azure_devops import FastMcpDailySummaryProvider
 from kwikledgers_fastmcp.domains.local_tracking import FastMcpTrackingSyncAdapter
@@ -13,6 +13,7 @@ from kwikledgers_fastmcp.shared.capability_gateway import (
     CapabilityDefinition,
     invoke_capability,
 )
+from kwikledgers_fastmcp.shared.operational_context import OperationalContext, bind_operational_context
 
 
 def build_server_metadata() -> dict[str, Any]:
@@ -69,8 +70,11 @@ def build_fastmcp_server() -> FastMCP:
 
 
 def _build_capability_handler(definition: CapabilityDefinition) -> Any:
-    async def capability_handler(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-        return await invoke_capability(definition, arguments)
+    async def capability_handler(ctx: Context, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        request = ctx.request_context
+        metadata = request.meta.model_dump() if request and request.meta else {}
+        with bind_operational_context(OperationalContext.from_metadata(metadata)):
+            return await invoke_capability(definition, arguments)
 
     capability_handler.__name__ = definition.name
     capability_handler.__doc__ = definition.description
