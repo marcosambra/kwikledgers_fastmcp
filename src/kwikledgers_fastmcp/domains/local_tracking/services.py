@@ -32,10 +32,12 @@ def resolve_workspace_root() -> Path:
 class TrackingService:
     """Transport-free writer preserving the local tracking artifact contracts."""
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(self, root: Path | None = None, *, tracking_root: Path | None = None) -> None:
         self._explicit_root = root is not None
         self.root = root if root is not None else resolve_workspace_root()
-        self.tracking_dir = self.root / "AI_Tracking"
+        configured = os.environ.get("KWIKLEDGERS_AI_TRACKING_ROOT") if root is None else None
+        selected = tracking_root if tracking_root is not None else configured
+        self.tracking_dir = Path(selected).expanduser().resolve() if selected else self.root / "AI_Tracking"
         self.task_control_dir = self.tracking_dir / "Task_Control"
         self.daily_log_dir = self.tracking_dir / "Daily_Action_Logs"
         self.metrics_dir = self.tracking_dir / "Metrics"
