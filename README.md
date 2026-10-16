@@ -168,7 +168,142 @@ See `ROADMAP.md` in this directory for the recommended migration order, slices, 
 - `src/kwikledgers_fastmcp/shared/contracts.py` starts the shared contract layer.
 - `tests/test_server.py` validates o registry, o envelope de capabilities e o dispatcher nativo.
 
-As 30 capabilities registradas são atendidas por serviços FastMCP nativos. O
+Todas as capabilities registradas são atendidas por serviços FastMCP nativos. O
 LangGraph usa `fastmcp` como único backend.
 
 The ownership and parity map is maintained in [docs/ownership-parity-matrix.md](docs/ownership-parity-matrix.md).
+
+## Trilha operacional por solicitação
+
+`kwikledgers_fastmcp.domains.local_tracking.request_metrics.RequestMetricsService`
+é o contrato compartilhado de persistência, sem dependências de hooks, grafos ou
+extensão. A fonte única é `AI_Tracking/Metrics/request-events.jsonl`. O serviço
+reutiliza o lock de threads e processos do `TrackingService`, sem novos locks
+concorrentes ou índices de estado secundários.
+
+```python
+from pathlib import Path
+from kwikledgers_fastmcp.domains.local_tracking.request_metrics import RequestMetricsService
+
+metrics = RequestMetricsService(root=Path("/workspace"))
+started = metrics.start_request("session-123", label="Validação operacional")
+metrics.append_event(
+    request_id=started["request_id"], session_id="session-123",
+    source="agent", kind="step", label="Executar testes", status="completed",
+    duration_ms=123.4, details={"measurement": "elapsed_monotonic"},
+)
+metrics.finish_request("session-123")
+events = metrics.read_events(limit=100)
+```
+
+### API e armazenamento
+
+- `RequestMetricsService(root: Path | None = None, *, tracking_root: Path | None = None)`:
+  `root` é o workspace e resulta em `root/AI_Tracking`. `tracking_root` é uma
+  pasta de tracking direta, com qualquer nome, e tem precedência. Sem ambos,
+  `KWIKLEDGERS_AI_TRACKING_ROOT` define a pasta direta; sem essa variável,
+  vale o workspace descoberto por `TrackingService`/`KWIKLEDGERS_ROOT_DIR`.
+  Um `root` explícito não é redirecionado pela variável de tracking.
+- `start_request(session_id: str, label: str = "Solicitação do usuário") -> dict`:
+  retorna o evento inicial com um novo `request_id` UUID. Interrompe primeiro
+  a solicitação ainda aberta **da mesma sessão**, sem alterar outras sessões.
+- `append_event(*, request_id: str, session_id: str = "", source: str, kind: str,
+  label: str, status: str, duration_ms: float | None = None,
+  details: dict | None = None, event_id: str | None = None) -> dict`:
+  aceita também ciclos independentes de grafos, sem sessão artificial.
+  `event_id` opcional é um UUID determinístico, por exemplo `uuid5` baseado em
+  request/run/índice/timestamp observado. Sob lock, uma repetição com o mesmo
+  conteúdo retorna o evento original, preservando `at`; conteúdo divergente
+  com o mesmo ID é rejeitado. A busca é linear no ledger, sem índice secundário.
+- `current_request(session_id: str) -> dict | None`: deriva o pedido aberto
+  exclusivamente do ledger; não há cache em memória como fonte de estado.
+- `finish_request(session_id: str, status: str = "completed") -> dict | None`:
+  encerra o pedido aberto. Repetir o fechamento não grava outro evento.
+- `read_events(limit: int = 100) -> list[dict]`: lê as últimas 1 a 1000 linhas,
+  em ordem cronológica, varrendo o final do arquivo com memória limitada.
+- `TrackingService(root).locked()` expõe o mesmo lock para integrações locais
+  que precisem proteger outros arquivos; não chamar métodos de métricas dentro
+  desse contexto, pois já adquirem o lock.
+
+Cada linha tem `schema_version: 1`, `event_id` UUID, `request_id`, `session_id`
+(vazio se desconhecido), `source`, `kind`, `at` ISO UTC, `label`, `status`,
+`details` e `duration_ms` opcional. IDs de correlação/sessão admitem somente
+letras ASCII, números e `_.:-`, com até 128 caracteres. Fontes:
+`agent`, `fastmcp`, `langgraph`. Tipos: `request_started`, `step`,
+`request_finished`. Status: `running`, `completed`, `failed`, `blocked`,
+`interrupted`; início exige `running` e término exige status terminal.
+
+Início e fechamento medem **tempo de parede UTC**, não CPU nem trabalho ativo.
+Uma volta do relógio deixa a duração desconhecida, com motivo explícito.
+Durações informadas devem ser números finitos não negativos, nunca booleanos.
+O contrato permite duração ausente ou `null` para desconhecido; novas escritas
+omitem `duration_ms` quando `None`. Nunca substituir desconhecido por zero.
+Ferramentas/grafos devem descrever sua medição em `details.measurement`.
+`at` é o instante de emissão; `details.observed_at` pode preservar o instante
+original de um evento exportado.
+
+### Privacidade e capabilities
+
+`label` e valores textuais de `details` são resumos operacionais limitados a
+160 caracteres, com controles removidos e redação defensiva de URLs, tokens e
+atribuições comuns de credenciais. Isso não é um classificador completo de
+segredos: os chamadores **não devem enviar prompts, argumentos, saídas,
+mensagens brutas de exceções ou segredos**, nem colocá-los em IDs.
+Campos de `details` não permitidos são descartados; valores aninhados não são
+aceitos. Allowlist: `capability`, `domain`, `operation`, `outcome`, `flow_name`,
+`node`, `correlation_id`, `run_id`, `parent_request_id`, `observed_at`,
+`measurement`, `tool_name`, `tool_call_id`, `reason`, `evidence`, `error_type`,
+`scope` (strings) e `error` (booleano).
+
+- `record_request_event`: capability `execute`, protegida pelo token existente,
+  recebe `{"event": {...campos de append_event...}}`. `request_id` continua
+  proibido no nível superior de argumentos de workflow.
+- `read_request_metrics`: capability `read`, recebe `{"limit": 100}` e retorna
+  `data.events`. As duas capabilities são excluídas da autoinstrumentação.
+- As demais chamadas no gateway medem duração com `perf_counter` e persistem
+  somente `capability/domain/operation/outcome`, nunca argumentos ou retornos.
+  `KWIKLEDGERS_REQUEST_ID` correlaciona explicitamente a chamada; nenhum ID de
+  sessão é inferido de tokens, pedidos abertos ou argumentos. Sem essa variável,
+  a chamada recebe UUID próprio e ciclo `request_started → step → request_finished`.
+  Em contexto explícito, o dono da solicitação é responsável pelo fechamento.
+
+### Falhas e limites
+
+Os gates de workflow e consumo de token continuam antes do dispatch. Um erro
+no ledger não é ignorado. `CapabilityMetricsError` informa
+`operation_dispatched`, `operation_executed`, `result`, `operation_error` e
+`ledger_error`. Se o domínio já retornou, o resultado está disponível em
+`result`; se lançou exceção após dispatch, efeitos externos são **incertos**.
+Isso vale especialmente para Azure: **não repetir escrita automaticamente**;
+reconciliar o efeito externo e a autorização antes de qualquer nova tentativa.
+Falha ao gravar o início standalone bloqueia o dispatch.
+
+Append usa flush/fsync sob lock. Falhas de disco podem ocorrer depois de bytes
+terem sido escritos; o evento pode existir apesar do erro. Linha parcial é
+reportada e não é corrigida ou descartada automaticamente. `event_id`
+determinístico permite reconciliar exportações repetidas. Interrupção entre
+o encerramento anterior e um novo início pode deixar apenas o encerramento.
+Não há rotação, retenção automática nem transação com Azure; scans de estado
+e deduplicação crescem com o ledger. O lock requer filesystem com suporte a
+`flock` (Linux) ou `msvcrt.locking` (Windows).
+
+### Evidência desta alteração — 2026-10-15
+
+- Arquivos: novo `domains/local_tracking/request_metrics.py`, integração no
+  `domains/local_tracking/services.py` e `shared/capability_gateway.py`,
+  `tests/test_request_metrics.py`, isolamento da instrumentação nos testes
+  existentes de gateway em `tests/test_server.py` e este README.
+- Motivo: trilha única por solicitação com duração observada, correlação
+  explícita e privacidade, pronta para consumidores independentes.
+- `tests.test_request_metrics`: 26 testes aprovados, incluindo concorrência
+  multiprocessos, sessões distintas, deduplicação concorrente, roots arbitrários,
+  duração desconhecida, sanitização, gates, cancelamento e erro de ledger
+  posterior à execução.
+- Suíte FastMCP: 194 testes, com 1 falha e 2 erros preexistentes reproduzidos
+  individualmente em uma cópia limpa de `HEAD`:
+  `test_root_discovery_without_legacy_agent`,
+  `test_execute_capability_allows_signed_matching_payload` e
+  `test_storage_failures_and_nonpersistent_paths_fail_closed`.
+  A primeira reprodução depende de manter os diretórios de teste dentro do
+  workspace; as duas outras pertencem ao contrato anterior de capabilities.
+  Não foram alteradas nesta entrega. Nenhuma escrita Azure, commit ou push.

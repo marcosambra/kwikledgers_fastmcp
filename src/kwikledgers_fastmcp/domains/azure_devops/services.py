@@ -2150,6 +2150,7 @@ def _query_assigned_items(email: str, sprint_path: str | None = None, *, in_prog
     ids = [str(work_item.id) for work_item in result.work_items]
     items = _get_work_items_in_batches(wit, ids=ids, fields=[
         "System.Id", "System.Title", "System.State", "System.WorkItemType",
+        "System.AssignedTo",
         "System.IterationPath", "System.ChangedDate", "System.Tags",
         "Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.RemainingWork",
         "Microsoft.VSTS.Scheduling.CompletedWork", "Microsoft.VSTS.Scheduling.OriginalEstimate"
@@ -2163,6 +2164,7 @@ def _query_assigned_items(email: str, sprint_path: str | None = None, *, in_prog
             "title": fields.get("System.Title"),
             "state": fields.get("System.State"),
             "work_item_type": fields.get("System.WorkItemType"),
+            "assigned_to": _serialize_assigned_to(fields.get("System.AssignedTo")),
             "iteration_path": fields.get("System.IterationPath"),
             "changed_at": str(fields.get("System.ChangedDate", "")),
             "story_points": fields.get("Microsoft.VSTS.Scheduling.StoryPoints") or 0,
@@ -2257,6 +2259,7 @@ def _query_child_items_summary(parent_items: list[dict[str, Any]]) -> dict[str, 
 
     child_items = _get_work_items_in_batches(wit, ids=[str(child_id) for child_id in unique_child_ids], fields=[
         "System.Id", "System.Title", "System.State", "System.WorkItemType",
+        "System.AssignedTo",
         "System.IterationPath", "System.ChangedDate", "System.Tags",
         "Microsoft.VSTS.Scheduling.StoryPoints", "Microsoft.VSTS.Scheduling.RemainingWork",
         "Microsoft.VSTS.Scheduling.CompletedWork", "Microsoft.VSTS.Scheduling.OriginalEstimate"
@@ -2272,6 +2275,7 @@ def _query_child_items_summary(parent_items: list[dict[str, Any]]) -> dict[str, 
             "title": fields.get("System.Title"),
             "state": state,
             "work_item_type": fields.get("System.WorkItemType"),
+            "assigned_to": _serialize_assigned_to(fields.get("System.AssignedTo")),
             "iteration_path": fields.get("System.IterationPath"),
             "changed_at": str(fields.get("System.ChangedDate", "")),
             "story_points": fields.get("Microsoft.VSTS.Scheduling.StoryPoints") or 0,
@@ -3611,4 +3615,3 @@ def _add_story_comment(story_id: int, comment: str) -> str:
     patch = [{"op": "add", "path": "/fields/System.History", "value": comment}]
     update_work_item(wit, document=patch, id=story_id)
     return f"Comentario adicionado na historia KL-{story_id}"
-

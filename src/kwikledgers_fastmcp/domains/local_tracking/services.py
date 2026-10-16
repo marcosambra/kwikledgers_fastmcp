@@ -33,6 +33,7 @@ class TrackingService:
     """Transport-free writer preserving the local tracking artifact contracts."""
 
     def __init__(self, root: Path | None = None) -> None:
+        self._explicit_root = root is not None
         self.root = root if root is not None else resolve_workspace_root()
         self.tracking_dir = self.root / "AI_Tracking"
         self.task_control_dir = self.tracking_dir / "Task_Control"
@@ -90,6 +91,12 @@ class TrackingService:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """Share the existing thread/process lock with other tracking writers."""
+        with _TRACKING_LOCK, self._filesystem_lock():
+            yield
+
     @staticmethod
     def _today_stamp() -> str:
         return datetime.utcnow().strftime("%Y-%m-%d")
@@ -131,7 +138,9 @@ class TrackingService:
             f"Itens devolvidos detectados: {len(returned_items)}"
         )
 
-    def append_daily_action_log(self, title: str, details: str, source: str = "agent") -> str:
+    def append_daily_action_log(
+        self, title: str, details: str, source: str = "agent", *, _invalidate: bool = True,
+    ) -> str:
         self._ensure_directories()
         log_path = self.daily_log_dir / f"{self._today_stamp()}.md"
         timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
@@ -144,6 +153,14 @@ class TrackingService:
             )
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"### {timestamp} - {title}\nFonte: {source}\n\n{details}\n\n")
+        if _invalidate:
+            # An operational log is not a sprint snapshot. Ask consumers to read
+            # Azure again; never synthesize work items from free-form Markdown.
+            self._atomic_write(
+                self.task_control_dir / "tracking-changed.json",
+                json.dumps({"changed_at": datetime.utcnow().isoformat() + "Z",
+                            "source": source, "reason": "operational_action"}) + "\n",
+            )
         return f"Log atualizado: {log_path}"
 
     def record_ai_metrics(
@@ -192,7 +209,7 @@ class TrackingService:
         payload = self._parse_summary(summary)
         log_result = self.append_daily_action_log(
             log_title or "Sincronizacao diaria do sprint",
-            log_details or build_default_log_details(payload), source,
+            log_details or build_default_log_details(payload), source, _invalidate=False,
         )
         metrics_result = self.record_ai_metrics(
             metrics_title or "Sincronizacao diaria",
@@ -214,7 +231,24 @@ class TrackingService:
         snapshot["exists"] = {name: path.exists() for name, path in paths.items()}
         return json.dumps(snapshot, indent=2, ensure_ascii=True)
 
-    def invoke(self, name: str, arguments: dict[str, Any]) -> str:
+    def record_request_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        from .request_metrics import RequestMetricsService
+
+        return RequestMetricsService(self.root if self._explicit_root else None).append_event(**event)
+
+    def read_request_metrics(self, limit: int = 100) -> dict[str, Any]:
+        from .request_metrics import RequestMetricsService
+
+        return {"events": RequestMetricsService(self.root if self._explicit_root else None).read_events(limit)}
+
+    def invoke(self, name: str, arguments: dict[str, Any]) -> Any:
+        # These services acquire this same lock themselves, without nesting flock.
+        metrics_handlers = {
+            "record_request_event": self.record_request_event,
+            "read_request_metrics": self.read_request_metrics,
+        }
+        if name in metrics_handlers:
+            return metrics_handlers[name](**arguments)
         handlers = {
             "sync_daily_tracking": self.sync_daily_tracking,
             "update_task_control": self.update_task_control,
@@ -224,11 +258,11 @@ class TrackingService:
         }
         if name not in handlers:
             return f"Ferramenta desconhecida: {name}"
-        with _TRACKING_LOCK, self._filesystem_lock():
+        with self.locked():
             return handlers[name](**arguments)
 
 
-async def invoke_tracking_capability(name: str, arguments: dict[str, Any]) -> str:
+async def invoke_tracking_capability(name: str, arguments: dict[str, Any]) -> Any:
     return await asyncio.to_thread(TrackingService().invoke, name, arguments)
 
 

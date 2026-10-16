@@ -82,6 +82,11 @@ class FastMcpServerTestCase(unittest.TestCase):
 
 
 class CapabilityGatewayTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        metrics = patch("kwikledgers_fastmcp.shared.capability_gateway.RequestMetricsService")
+        metrics.start()
+        self.addCleanup(metrics.stop)
+
     def test_active_user_uses_native_dispatch(self) -> None:
         definition = CapabilityDefinition("get_active_user", "azure_devops", "read", "test")
 

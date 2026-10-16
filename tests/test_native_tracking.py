@@ -20,6 +20,16 @@ from kwikledgers_fastmcp.domains.local_tracking.services import (
 
 
 class NativeTrackingTests(unittest.TestCase):
+    def test_operational_log_invalidates_but_summary_sync_does_not_loop(self) -> None:
+        self.service.append_daily_action_log("Task atribuída", "KL-131596", "agent")
+        marker = self.service.task_control_dir / "tracking-changed.json"
+        before = marker.read_bytes()
+        payload = json.loads(before)
+        self.assertEqual(payload["source"], "agent")
+        self.assertEqual(payload["reason"], "operational_action")
+        self.service.sync_daily_tracking('{"items": []}', ["Consulta"], source="vscode-extension")
+        self.assertEqual(marker.read_bytes(), before)
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -291,4 +301,3 @@ class NativeTrackingTests(unittest.TestCase):
             env={**os.environ, "PYTHONPATH": str(source_root)},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-

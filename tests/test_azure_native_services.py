@@ -36,6 +36,14 @@ def item(work_item_id: int, title: str, kind: str = "User Story", state: str = "
 
 
 class NativeServiceTests(unittest.TestCase):
+    def test_assignee_survives_assigned_and_child_summary_reads(self) -> None:
+        assigned = services._query_assigned_items("dev@example.test")
+        self.assertEqual(assigned[0]["assigned_to"], "Developer")
+        self.assertIn("System.AssignedTo", self.wit.get_work_items.call_args.kwargs["fields"])
+        children = services._query_child_items_summary([{"id": 1, "title": "Story"}])
+        self.assertEqual(children["children_by_parent"][0]["children"][0]["assigned_to"], "Developer")
+        self.assertIn("System.AssignedTo", self.wit.get_work_items.call_args.kwargs["fields"])
+
     def test_summary_keeps_personal_other_sprint_story_separate_from_sprint_totals(self) -> None:
         current = services._query_assigned_items("dev@example.test")
         other = {**current[0], "id": 129245, "work_item_type": "Bug", "state": "Desenvolvimento", "iteration_path": "Project\\2026\\Sprint 19"}
@@ -746,4 +754,3 @@ class NativeServiceTests(unittest.TestCase):
         with self.assertRaises(AzureCapabilityError):
             self.invoke("associate_story_branch", **self.branch_request(source_branch="refs/heads/"))
         self.wit.update_work_item.assert_not_called()
-
