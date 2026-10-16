@@ -144,7 +144,8 @@ async def invoke_capability(
         try:
             await asyncio.to_thread(
                 metrics.append_event,
-                request_id=request_id, source="fastmcp", kind="step",
+                request_id=request_id, session_id=context.session_id if context else "",
+                source="fastmcp", kind="step",
                 label=definition.name, status=status, duration_ms=duration_ms,
                 details={**metadata, "outcome": outcome},
             )
