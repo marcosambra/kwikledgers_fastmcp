@@ -13,6 +13,7 @@ from kwikledgers_fastmcp.domains.local_tracking.request_metrics import _identifi
 
 METADATA_KEY = "kwikledgers/context"
 _current: ContextVar[OperationalContext | None] = ContextVar("operational_context", default=None)
+_bound: ContextVar[bool] = ContextVar("operational_context_bound", default=False)
 
 
 @dataclass(frozen=True)
@@ -64,13 +65,15 @@ class OperationalContext:
 
 
 def current_operational_context() -> OperationalContext | None:
-    return _current.get() or OperationalContext.from_environment()
+    return _current.get() if _bound.get() else OperationalContext.from_environment()
 
 
 @contextmanager
 def bind_operational_context(context: OperationalContext | None) -> Iterator[None]:
     token = _current.set(context)
+    bound_token = _bound.set(True)
     try:
         yield
     finally:
+        _bound.reset(bound_token)
         _current.reset(token)
