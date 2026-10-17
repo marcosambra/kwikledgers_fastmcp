@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import hmac
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import types
@@ -165,10 +165,9 @@ class CapabilityGatewayTestCase(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             asyncio.run(invoke_capability(definition, {"story_id": 1, "status": "Closed"}))
 
-    def test_execute_capability_allows_signed_matching_payload(self) -> None:
+    def test_execute_capability_allows_registered_matching_payload(self) -> None:
         definition = CapabilityDefinition("update_story_status", "azure_devops", "execute", "test")
         arguments = {"story_id": 1, "status": "Closed", "expected_revision": 1}
-        token = self._build_execution_token(definition.name, arguments)
 
         async def dispatch(name: str, received_arguments: dict[str, object]) -> dict[str, object]:
             self.assertEqual(name, "update_story_status")
@@ -185,6 +184,7 @@ class CapabilityGatewayTestCase(unittest.TestCase):
                 "KWIKLEDGERS_FASTMCP_EXECUTION_KEY": "test-key",
                 "KWIKLEDGERS_FASTMCP_CAPABILITY_LEDGER": str(Path(temporary_directory) / "ledger.sqlite3"),
             }, clear=False):
+                token = self._build_execution_token(definition.name, arguments)
                 with patch("kwikledgers_fastmcp.shared.capability_gateway.invoke_azure_capability", new=dispatch):
                     result = asyncio.run(
                         invoke_capability(
@@ -199,6 +199,8 @@ class CapabilityGatewayTestCase(unittest.TestCase):
         serialized = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         now = datetime.now(timezone.utc)
         payload = {
+            "version": 1,
+            "action": "story_status_transition.execute",
             "capability": capability_name,
             "payload_digest": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
             "run_id": "test-run",
@@ -209,8 +211,18 @@ class CapabilityGatewayTestCase(unittest.TestCase):
         }
         payload_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         encoded_payload = base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
-        signature = hmac.new(b"test-key", payload_bytes, hashlib.sha256).hexdigest()
-        return f"{encoded_payload}.{signature}"
+        token = f"{encoded_payload}.local-v1"
+        with sqlite3.connect(os.environ["KWIKLEDGERS_FASTMCP_CAPABILITY_LEDGER"]) as connection:
+            connection.execute(
+                "CREATE TABLE local_execution_capabilities "
+                "(token_digest TEXT PRIMARY KEY, nonce_digest TEXT UNIQUE NOT NULL, expires_at REAL NOT NULL)"
+            )
+            connection.execute("INSERT INTO local_execution_capabilities VALUES (?, ?, ?)", (
+                hashlib.sha256(token.encode("ascii")).hexdigest(),
+                hashlib.sha256(payload["nonce"].encode("ascii")).hexdigest(),
+                datetime.fromisoformat(payload["expires_at"]).timestamp(),
+            ))
+        return token
 
 
 class FastMcpTrackingSyncAdapterTestCase(unittest.TestCase):

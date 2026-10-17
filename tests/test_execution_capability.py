@@ -399,7 +399,7 @@ class ExecutionCapabilityTestCase(unittest.TestCase):
         with patch("kwikledgers_fastmcp.shared.execution_capability.sqlite3.connect", side_effect=sqlite3.OperationalError("locked")):
             with self.assertRaises(ExecutionCapabilityError):
                 self._verify(token)
-            self._verify(token)
+        self._verify(token)
 
     def test_expiry_is_rechecked_inside_claim(self) -> None:
         token = self._local_token()
