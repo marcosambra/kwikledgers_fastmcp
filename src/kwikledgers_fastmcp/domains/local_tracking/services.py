@@ -231,6 +231,8 @@ class TrackingService:
         }
         snapshot: dict[str, Any] = {name: str(path) for name, path in paths.items()}
         snapshot["exists"] = {name: path.exists() for name, path in paths.items()}
+        if paths["task_control"].exists():
+            snapshot["task_control_data"] = json.loads(paths["task_control"].read_text(encoding="utf-8"))
         return json.dumps(snapshot, indent=2, ensure_ascii=True)
 
     def record_request_event(self, event: dict[str, Any]) -> dict[str, Any]:

@@ -2071,6 +2071,7 @@ def _serialize_work_item_payload(item: WorkItem, extra_payload: Optional[dict[st
         "completed_work_hours": fields.get("Microsoft.VSTS.Scheduling.CompletedWork"),
         "original_estimate_hours": fields.get("Microsoft.VSTS.Scheduling.OriginalEstimate"),
         "url": getattr(item, "url", None),
+        "browser_url": _build_browser_work_item_url(fields.get("System.Id", getattr(item, "id", None))),
     }
     if extra_payload:
         payload.update(extra_payload)

@@ -20,6 +20,14 @@ from kwikledgers_fastmcp.domains.local_tracking.services import (
 
 
 class NativeTrackingTests(unittest.TestCase):
+    def test_snapshot_exposes_persisted_items_and_reports_corrupt_json(self) -> None:
+        self.service.update_task_control('{"items": [{"id": 42, "assigned_to": "Native User"}]}')
+        result = json.loads(self.service.read_tracking_snapshot())
+        self.assertEqual(result["task_control_data"]["items"][0]["assigned_to"], "Native User")
+        self.service.task_control_dir.joinpath("current-sprint.json").write_text("{", encoding="utf-8")
+        with self.assertRaises(json.JSONDecodeError):
+            self.service.read_tracking_snapshot()
+
     def test_operational_log_invalidates_but_summary_sync_does_not_loop(self) -> None:
         self.service.append_daily_action_log("Task atribuída", "KL-131596", "agent")
         marker = self.service.task_control_dir / "tracking-changed.json"
