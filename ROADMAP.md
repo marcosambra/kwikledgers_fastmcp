@@ -21,7 +21,9 @@ a integração local passou, mas as restrições reais do host continuam pendent
 - Retomada operacional: leitura Azure autenticada, resumo diário, refresh
 	compilado da extensão, métricas compartilhadas, calendário Outlook e smoke
 	de ativação/comandos/restauração em Extension Host real aprovados.
-- Nenhuma escrita Azure ou troca de agendamento foi realizada.
+- Nenhuma escrita Azure foi realizada. Após aprovação em 2026-10-19,
+	os comandos dos dois agendamentos foram migrados para FastMCP, com backup
+	e validação; observar os próximos gatilhos naturais continua pendente.
 
 As suítes completas anteriores não foram reexecutadas nesta atualização
 documental. As revisões e os comandos dos smokes reais estão no
@@ -32,7 +34,7 @@ documental. As revisões e os comandos dos smokes reais estão no
 | Etapa | Estado | Próximo gate |
 |---|---|---|
 | Implementações nativas dos três domínios | Implementada | Preservar contratos e evidência de regressão. |
-| Backend e imports neutros | Somente FastMCP; backend legado removido | Migrar os dois agendamentos legados após aprovação. |
+| Backend e imports neutros | Somente FastMCP; os dois agendamentos conhecidos foram migrados com aprovação | Observar os próximos gatilhos naturais. |
 | Segurança de execução | Aprovação local explícita após prévia; tokens `.local-v1` de até cinco minutos, vínculo exato e anti-replay; recibos antigos rejeitados | Preservar a fronteira de confiança local e a revisão nativa. |
 | Criação governada | Integração local aprovada | Obter configuração confiável com restrições reais do processo. |
 | Bootstrap e workflows de especialistas | Preparados | Executar instalações e pipelines; registrar resultados. |
@@ -42,8 +44,8 @@ documental. As revisões e os comandos dos smokes reais estão no
 
 ## Ordem de Continuação
 
-1. Aprovar as prévias exatas da tarefa Windows e do cron ainda legados,
-	 exportar suas configurações e trocar somente as ações autorizadas.
+1. Observar as próximas execuções naturais da tarefa Windows e do cron
+	 já migrados, sem antecipar gatilhos; configurações originais exportadas.
 2. Validar a configuração real de criação fornecida pelo host; não fabricar
 	 restrições nem usar APIs internas como caminho alternativo.
 3. Executar instalações de especialistas e pipelines preparados somente

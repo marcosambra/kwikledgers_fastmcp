@@ -40,7 +40,7 @@
 | FastMCP domain implementation | Ativo | As 30 capabilities usam serviços nativos de Azure DevOps, tracking local e Windows. |
 | LangGraph processos | Ativo | Mantém guardrails, replay, status flow e workflows existentes. |
 | Migração de serviços puros | Concluída | A configuração usa arquivo explícito ou `.env` do workspace; não consulta `agent/mcp_servers`. |
-| Sunset do legado | Retirada operacional pendente | Somente FastMCP é suportado. Tarefa Windows e cron ainda legados foram inventariados; trocar suas ações exige aprovação. |
+| Sunset do legado | Agendamentos conhecidos migrados; observação pendente | Somente FastMCP é suportado. Comandos da tarefa Windows e do cron migrados após aprovação em 2026-10-19, com configurações preservadas e smokes executados. Próximos gatilhos naturais ainda não observados. |
 
 ## Evidência do Slice de Identidade Ativa (2026-09-25)
 
