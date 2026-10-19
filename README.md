@@ -16,6 +16,15 @@ This directory now exposes the FastMCP capability transport for Azure DevOps, lo
 FastMCP is the integration facade.
 LangGraph is the workflow engine.
 
+`update_work_item_content` also accepts an optional `title` for existing Tasks.
+The title must be nonempty, single-line text; other work item types cannot be
+renamed through this capability. It patches `System.Title` with the existing
+revision guard and confirms the returned title. Renaming does not change
+status, iteration, parent, assignment or effort. The LangGraph atomic lifecycle
+owns the old/new title preview and separate human approval; presentation
+metadata is not sent to FastMCP, and an execution capability remains required.
+Content edits without a title keep their existing behavior.
+
 Operational correlation uses version `1` of `kwikledgers/context` in MCP
 `_meta`, separate from business arguments and execution capabilities.
 `request_id` is required; workspace, session, run and parent/child span IDs are
@@ -182,6 +191,21 @@ See `ROADMAP.md` in this directory for the recommended migration order, slices, 
 
 Todas as capabilities registradas são atendidas por serviços FastMCP nativos. O
 LangGraph usa `fastmcp` como único backend.
+
+### Certificados TLS do Azure DevOps
+
+Quando `/etc/ssl/certs/ca-certificates.crt` existe, a configuração nativa do cliente
+Azure usa esse bundle completo em `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`,
+`AZURE_CA_BUNDLE` e `CURL_CA_BUNDLE`, inclusive quando o processo herda caminhos
+existentes para certificados isolados do Zscaler ou os carrega do `.env`.
+A seleção ocorre antes de criar a conexão do SDK e atende também aos clientes
+derivados de descoberta, identidade, work items e Git.
+
+A validação HTTPS permanece habilitada. Um bundle do sistema vazio ou sem
+permissão de leitura gera erro explícito; não há repetição com `verify=False`.
+Em plataformas sem esse arquivo, a configuração de certificados da plataforma
+e as variáveis existentes são preservadas. A CA corporativa precisa estar
+instalada no trust store do sistema; o cliente não instala certificados.
 
 The ownership and parity map is maintained in [docs/ownership-parity-matrix.md](docs/ownership-parity-matrix.md).
 

@@ -37,6 +37,7 @@ class CapabilityDefinition:
 
 AZURE_CAPABILITIES = (
     CapabilityDefinition("get_active_user", "azure_devops", "read", "Retorna a identidade ativa do Azure DevOps."),
+    CapabilityDefinition("get_work_item_process_metadata", "azure_devops", "read", "Consulta tipos e restrições reais de campos do processo Azure."),
     CapabilityDefinition("get_my_work_items", "azure_devops", "read", "Lista os work items atribuídos ao usuário ativo."),
     CapabilityDefinition("get_my_blocked_items", "azure_devops", "read", "Lista os itens bloqueados atribuídos ao usuário ativo."),
     CapabilityDefinition("get_my_daily_summary", "azure_devops", "read", "Retorna o resumo diário normalizado do Azure DevOps."),

@@ -3355,16 +3355,19 @@ def _update_work_item_content(
     assigned_to: str | None = None,
     area_path: str | None = None,
     status: str | None = None,
+    title: str | None = None,
 ) -> str:
+    if title is not None and (not isinstance(title, str) or not title.strip() or "\n" in title or "\r" in title):
+        raise ValueError("Task title must be nonempty single-line text.")
     normalized_comment = str(comment or "").strip()
     formatted_description = _format_azure_rich_text(description) if description is not None else None
     formatted_acceptance_criteria = (
         _format_azure_rich_text(acceptance_criteria) if acceptance_criteria is not None else None
     )
 
-    if all(value is None for value in (description, acceptance_criteria, assigned_to, area_path, status)) and not normalized_comment:
+    if all(value is None for value in (title, description, acceptance_criteria, assigned_to, area_path, status)) and not normalized_comment:
         raise ValueError(
-            "Informe description, acceptance_criteria ou comment para atualizar o conteudo do work item."
+            "Informe title, description, acceptance_criteria ou comment para atualizar o conteudo do work item."
         )
 
     connection = get_client()
@@ -3378,6 +3381,8 @@ def _update_work_item_content(
         "System.IterationPath",
     ])
     work_item_type = str(current_item.fields.get("System.WorkItemType") or "").strip()
+    if title is not None and work_item_type.casefold() != "task":
+        raise ValueError("Title edits are only supported for Tasks.")
     supported_fields = _get_supported_work_item_fields(wit, work_item_type)
 
     document: list[dict[str, Any]] = []
@@ -3386,6 +3391,7 @@ def _update_work_item_content(
     requested_fields: list[str] = []
 
     for name, reference, value in (
+        ("title", "System.Title", title),
         ("assigned_to", "System.AssignedTo", assigned_to),
         ("area_path", "System.AreaPath", area_path),
         ("status", "System.State", status),
@@ -3428,6 +3434,8 @@ def _update_work_item_content(
 
     updated_item = update_work_item(wit, document=document, id=work_item_id)
     _confirm_work_item_status(updated_item, work_item_id, status)
+    if title is not None and (getattr(updated_item, "fields", {}) or {}).get("System.Title") != title:
+        raise RuntimeError("Azure returned a title mismatch after the update; reconcile before retry.")
     return _serialize_work_item_payload(
         updated_item,
         {
@@ -3475,7 +3483,21 @@ def _update_work_item_effort(
         "System.IterationPath",
     ])
     work_item_type = str(current_item.fields.get("System.WorkItemType") or "").strip()
+    current_state = str(current_item.fields.get("System.State") or "").strip()
     supported_fields = _get_supported_work_item_fields(wit, work_item_type)
+
+    if status == "Closed" and current_state == "New":
+        if "System.State" not in supported_fields:
+            raise ValueError(f"System.State is not supported by {work_item_type}.")
+        activated_item = update_work_item(
+            wit,
+            document=[{"op": "add", "path": "/fields/System.State", "value": "Active"}],
+            id=work_item_id,
+        )
+        EXPECTED_REVISIONS.set({
+            **EXPECTED_REVISIONS.get(),
+            work_item_id: validate_revision(getattr(activated_item, "rev", None)),
+        })
 
     document: list[dict[str, Any]] = []
     applied_fields: list[str] = []

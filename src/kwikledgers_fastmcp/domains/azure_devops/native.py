@@ -11,10 +11,12 @@ from . import services
 from .configuration import load_configuration
 from .primitives import EXPECTED_REVISIONS, validate_revision
 from .read_services import read_active_user
+from .process_metadata import read_work_item_process_metadata
 
 
 CAPABILITIES: dict[str, tuple[str, Callable[..., str]]] = {
     "get_active_user": ("read", read_active_user),
+    "get_work_item_process_metadata": ("read", read_work_item_process_metadata),
     "get_my_work_items": ("read", services._get_my_work_items),
     "get_my_blocked_items": ("read", services._get_my_blocked_items),
     "get_my_daily_summary": ("read", services._get_my_daily_summary),

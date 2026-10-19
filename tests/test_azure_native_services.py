@@ -183,7 +183,7 @@ class NativeServiceTests(unittest.TestCase):
         self.wit.query_by_wiql.side_effect = self.query
         self.wit.get_work_item_types.return_value = [SimpleNamespace(name=name) for name in ("Task", "User Story", "Technical Debt", "Bug", "Spike")]
         self.wit.get_work_item_type_fields_with_references.return_value = [
-            SimpleNamespace(reference_name=name) for name in (*services.WORK_ITEM_FIELD_ALIASES, "System.State", "System.AssignedTo", "System.AreaPath")
+            SimpleNamespace(reference_name=name) for name in (*services.WORK_ITEM_FIELD_ALIASES, "System.Title", "System.State", "System.AssignedTo", "System.AreaPath")
         ]
         self.wit.create_work_item.side_effect = self.create_item
         self.wit.update_work_item.side_effect = self.update_item
@@ -541,6 +541,57 @@ class NativeServiceTests(unittest.TestCase):
         self.assertEqual(data["description_format"], "azure_simple_html")
         self.assertEqual(data["revision"], 8)
         self.assertIn("<ol><li>First</li><li>Second</li></ol>", self.items[1].fields["System.Description"])
+
+    def test_title_edit_patches_only_title_with_revision_and_confirms_result(self) -> None:
+        before = copy.deepcopy(self.items[2].fields)
+        data = self.invoke("update_work_item_content", work_item_id=2, title="[FETCH BANK] Pagination", expected_revision=7)
+        self.assertEqual(data["title"], "[FETCH BANK] Pagination")
+        self.assertEqual(data["applied_fields"], ["title"])
+        self.assertEqual(data["revision"], 8)
+        self.assertEqual(self.items[2].fields, {**before, "System.Title": "[FETCH BANK] Pagination"})
+        self.assertEqual(self.wit.update_work_item.call_args.kwargs["document"], [
+            {"op": "test", "path": "/rev", "value": 7},
+            {"op": "add", "path": "/fields/System.Title", "value": "[FETCH BANK] Pagination"},
+        ])
+
+    def test_title_edit_can_update_description_in_the_same_patch(self) -> None:
+        data = self.invoke("update_work_item_content", work_item_id=2, title="Backend task",
+                           description="<p>Backend scope.</p>", expected_revision=7)
+        self.assertEqual(data["applied_fields"], ["title", "description"])
+        self.assertEqual(self.items[2].fields["System.Description"], "<p>Backend scope.</p>")
+        self.wit.update_work_item.assert_called_once()
+
+    def test_title_edit_rejects_invalid_title_before_writing(self) -> None:
+        for title in ("", "  ", "One\nTwo", "One\rTwo", 123, True):
+            with self.subTest(title=title), self.assertRaises((ValueError, AzureCapabilityError)):
+                self.invoke("update_work_item_content", work_item_id=2, title=title,
+                            description="<p>Must not mask invalid title.</p>", expected_revision=7)
+        self.wit.update_work_item.assert_not_called()
+
+    def test_title_edit_rejects_non_task_and_unsupported_title_field(self) -> None:
+        with self.assertRaises((ValueError, AzureCapabilityError)):
+            self.invoke("update_work_item_content", work_item_id=1, title="Not a task", expected_revision=7)
+        self.wit.get_work_item_type_fields_with_references.return_value = [
+            SimpleNamespace(reference_name="System.Description"),
+        ]
+        services.WORK_ITEM_FIELD_CACHE.clear()
+        with self.assertRaises((ValueError, AzureCapabilityError)):
+            self.invoke("update_work_item_content", work_item_id=2, title="Task", expected_revision=7)
+        self.wit.update_work_item.assert_not_called()
+
+    def test_title_edit_mismatch_is_not_reported_as_success(self) -> None:
+        self.wit.update_work_item.side_effect = lambda **kwargs: SimpleNamespace(
+            id=2, rev=8, fields={**self.items[2].fields, "System.Title": "Unexpected title"},
+        )
+        with self.assertRaisesRegex(AzureCapabilityError, "title mismatch"):
+            self.invoke("update_work_item_content", work_item_id=2, title="Approved title", expected_revision=7)
+        self.wit.update_work_item.assert_called_once()
+
+    def test_title_edit_stale_revision_does_not_change_the_title(self) -> None:
+        original = self.items[2].fields["System.Title"]
+        with self.assertRaisesRegex(AzureCapabilityError, "revision conflict"):
+            self.invoke("update_work_item_content", work_item_id=2, title="Approved title", expected_revision=6)
+        self.assertEqual(self.items[2].fields["System.Title"], original)
 
     def test_update_work_item_effort_preserves_empty_remaining_and_support_filter(self) -> None:
         self.wit.get_work_item_type_fields_with_references.return_value = [SimpleNamespace(reference_name="Microsoft.VSTS.Scheduling.CompletedWork")]

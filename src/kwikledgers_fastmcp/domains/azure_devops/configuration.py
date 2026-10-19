@@ -7,6 +7,9 @@ from typing import Any
 from dotenv import load_dotenv
 
 
+_SYSTEM_CA_BUNDLE = Path("/etc/ssl/certs/ca-certificates.crt")
+
+
 def workspace_root() -> Path:
     explicit = os.environ.get("KWIKLEDGERS_ROOT_DIR")
     if explicit:
@@ -26,12 +29,13 @@ def load_configuration() -> Path | None:
     loaded = next((candidate for candidate in candidates if candidate.is_file()), None)
     if loaded:
         load_dotenv(loaded)
-    bundle = Path("/etc/ssl/certs/ca-certificates.crt")
+    bundle = _SYSTEM_CA_BUNDLE
     if bundle.is_file():
+        with bundle.open("rb") as certificates:
+            if not certificates.read(1):
+                raise ValueError(f"Azure TLS system CA bundle is empty: {bundle}")
         for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "AZURE_CA_BUNDLE", "CURL_CA_BUNDLE"):
-            current = os.environ.get(name)
-            if not current or not Path(current).is_file():
-                os.environ[name] = str(bundle)
+            os.environ[name] = str(bundle)
     return loaded
 
 
