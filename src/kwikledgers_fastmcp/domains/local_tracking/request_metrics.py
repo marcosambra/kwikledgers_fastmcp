@@ -20,6 +20,7 @@ DETAIL_FIELDS = frozenset({
     "capability", "domain", "operation", "outcome", "flow_name", "node",
     "correlation_id", "run_id", "parent_request_id", "observed_at", "measurement",
     "tool_name", "tool_call_id", "reason", "evidence", "error_type", "scope", "error",
+    "workspace_id", "session_id", "span_id", "parent_span_id",
 })
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SENSITIVE = re.compile(
@@ -224,15 +225,20 @@ class RequestMetricsService:
 
     def start_request(
         self, session_id: str, label: str = "Solicitação do usuário",
+        *, request_id: str | None = None,
     ) -> dict[str, Any]:
         _identifier(session_id, "session_id")
+        if request_id is not None:
+            _identifier(request_id, "request_id")
         # Validate first; an invalid start must not interrupt the current request.
         event = self._event(
-            request_id=str(uuid4()), session_id=session_id, source="agent",
+            request_id=request_id or str(uuid4()), session_id=session_id, source="agent",
             kind="request_started", label=label, status="running",
             details={"measurement": "wall_clock_utc"},
         )
         with self._tracking.locked():
+            if request_id is not None and any(event["request_id"] == request_id for event in self._reverse_events()):
+                raise ValueError("O identificador de solicitação já foi utilizado.")
             current = self._current(session_id)
             if current is not None:
                 self._finish(current, "interrupted")

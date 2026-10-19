@@ -4,8 +4,8 @@
 
 - **FastMCP** registra tools, valida schemas, normaliza payloads e executa capacidades atômicas dos domínios.
 - **LangGraph** é dono de todas as regras de processo, aprovação, replay, lifecycle, sequência e coordenação entre domínios.
-- As regras de `AGENTS.md` e `agent/kwikledgers.agent.md` não podem ser embutidas em handlers FastMCP.
-- Toda capability FastMCP de tipo `execute` exige uma capability HMAC curta, emitida pelo LangGraph após os guardrails. O FastMCP apenas valida ação, digest do payload e expiração.
+- As regras de `.github/copilot-instructions.md` e os padrões de `agent/kwikledgers.agent.md` não podem ser embutidos em handlers FastMCP; `AGENTS.md` contém somente o mapa.
+- Toda capability FastMCP de tipo `execute` exige token local `.local-v1`, emitido pelo LangGraph após os guardrails. O FastMCP valida ação, digest, run, request, TTL de até cinco minutos e uso único no ledger compartilhado. Tokens locais não são aceitos por HTTP; recibos antigos são rejeitados.
 
 ## Regras do Agente
 
@@ -36,14 +36,19 @@
 | Camada | Estado | Observação |
 |---|---|---|
 | FastMCP transport | Ativo | Registry FastMCP registra as 30 capabilities atômicas. |
-| FastMCP execute authorization | Ativo | Tools `execute` exigem capability HMAC emitida pelo LangGraph com ação, digest, run, request e expiração. |
+| FastMCP execute authorization | Ativo | Tools `execute` exigem token `.local-v1` emitido pelo LangGraph com ação, digest, run, request, expiração e anti-replay. |
 | FastMCP domain implementation | Ativo | As 30 capabilities usam serviços nativos de Azure DevOps, tracking local e Windows. |
 | LangGraph processos | Ativo | Mantém guardrails, replay, status flow e workflows existentes. |
 | Migração de serviços puros | Concluída | A configuração usa arquivo explícito ou `.env` do workspace; não consulta `agent/mcp_servers`. |
-| Sunset do legado | Em observação | O backend padrão é FastMCP; o rollback legado é explícito e temporário. |
+| Sunset do legado | Agendamentos conhecidos migrados; observação pendente | Somente FastMCP é suportado. Comandos da tarefa Windows e do cron migrados após aprovação em 2026-10-19, com configurações preservadas e smokes executados. Próximos gatilhos naturais ainda não observados. |
 
 ## Evidência do Slice de Identidade Ativa (2026-09-25)
 
 - `get_active_user` preserva o envelope FastMCP e a resposta textual do legado; testes cobrem identidade configurada, fallback do `.env`, Git e e-mail ausente, sem chamada ao `_dispatch`.
 - Validação: `poetry run python -m unittest discover -s tests -p 'test_*.py'` no diretório `kwikledgers_fastmcp` (16 testes, OK).
 - Compatibilidade: as demais capabilities seguem no gateway legado. Nenhum fluxo mutável, política LangGraph ou autorização foi alterado.
+
+O parágrafo de compatibilidade acima descreve somente o slice histórico de
+2026-09-25. O estado atual está na tabela de migração: não existe gateway ou
+backend legado suportado. Comandos, revisões e limites da validação real estão
+no [guia operacional](../../docs/validation/fastmcp-langgraph-legacy-sunset.md).
