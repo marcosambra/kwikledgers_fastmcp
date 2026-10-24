@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import UUID, uuid4
 
+from .segmented_jsonl import SegmentedJsonl
 from .services import TrackingService
 
 SOURCES = frozenset({"agent", "fastmcp", "langgraph"})
@@ -126,24 +127,22 @@ class RequestMetricsService:
         line = (json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
         if len(line) > MAX_LINE_BYTES:
             raise ValueError("Evento excede o limite de tamanho.")
-        self.ledger_path.parent.mkdir(parents=True, exist_ok=True)
         # Refuse a partial last record rather than silently joining JSON objects.
-        with self.ledger_path.open("a+b") as handle:
-            handle.seek(0, os.SEEK_END)
-            if handle.tell():
-                handle.seek(-1, os.SEEK_END)
-                if handle.read(1) != b"\n":
-                    raise ValueError("Ledger de métricas incompleto; reconcilie antes de gravar.")
-            handle.seek(0, os.SEEK_END)
-            handle.write(line)
-            handle.flush()
-            os.fsync(handle.fileno())
+        SegmentedJsonl(self.ledger_path).append(
+            [line], fsync=True,
+            partial_error="Ledger de métricas incompleto; reconcilie antes de gravar.",
+        )
         return event
 
     def _reverse_events(self) -> Iterator[dict[str, Any]]:
-        if not self.ledger_path.exists():
+        """Newest first across every segment, active file first."""
+        for path in reversed(SegmentedJsonl(self.ledger_path).paths()):
+            yield from self._reverse_file(path)
+
+    def _reverse_file(self, path: Path) -> Iterator[dict[str, Any]]:
+        if not path.exists():
             return
-        with self.ledger_path.open("rb") as handle:
+        with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
             position = handle.tell()
             pending = b""

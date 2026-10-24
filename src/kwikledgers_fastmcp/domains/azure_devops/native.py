@@ -30,10 +30,15 @@ CAPABILITIES: dict[str, tuple[str, Callable[..., str]]] = {
     "preview_story_pull_request": ("preview", services._preview_story_pull_request),
     "associate_story_branch": ("execute", services._associate_story_branch),
     "create_story_pull_request": ("execute", services._create_story_pull_request),
+    "list_story_pull_requests": ("read", services._list_story_pull_requests),
+    "publish_story_pull_request": ("execute", services._publish_story_pull_request),
+    "cherry_pick_story_pull_request": ("execute", services._cherry_pick_story_pull_request),
+    "get_story_cherry_pick": ("read", services._get_story_cherry_pick),
     "create_work_item": ("execute", services._create_work_item),
     "find_similar_technical_debts": ("read", services._find_similar_technical_debts),
     "save_technical_debt_preview_cache": ("execute", services._save_technical_debt_preview_cache),
     "update_work_item_content": ("execute", services._update_work_item_content),
+    "update_task_fields": ("execute", services._update_task_fields),
     "update_work_item_effort": ("execute", services._update_work_item_effort),
     "move_work_item_to_next_sprint": ("execute", services._move_work_item_to_next_sprint),
     "update_story_status": ("execute", services._update_story_status),
@@ -41,7 +46,7 @@ CAPABILITIES: dict[str, tuple[str, Callable[..., str]]] = {
 }
 
 REVISION_REQUIRED_CAPABILITIES = {
-    "update_work_item_content", "update_work_item_effort", "move_work_item_to_next_sprint",
+    "update_work_item_content", "update_task_fields", "update_work_item_effort", "move_work_item_to_next_sprint",
     "update_story_status", "add_story_comment",
 }
 REVISION_MAP_CAPABILITIES = {"associate_story_branch", "create_story_pull_request"}

@@ -217,6 +217,12 @@ extensão. A fonte única é `AI_Tracking/Metrics/request-events.jsonl`. O servi
 reutiliza o lock de threads e processos do `TrackingService`, sem novos locks
 concorrentes ou índices de estado secundários.
 
+O arquivo ativo mantém o nome e tem no máximo 5 MB. Ao atingir o limite ele é
+arquivado como `request-events.partNNNN.jsonl` (quebra somente entre linhas) e um
+novo ativo é iniciado; o mesmo vale para `langgraph-runtime-events.jsonl`. Partes
+com mais de 14 dias são apagadas. A leitura percorre as partes em ordem e depois o
+ativo (`local_tracking/segmented_jsonl.py`).
+
 ```python
 from pathlib import Path
 from kwikledgers_fastmcp.domains.local_tracking.request_metrics import RequestMetricsService

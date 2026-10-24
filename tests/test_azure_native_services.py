@@ -133,7 +133,7 @@ class NativeServiceTests(unittest.TestCase):
             self.assertEqual(services._extract_sprint_number(name), 20)
         with self.assertRaises(ValueError):
             services._get_my_daily_summary(story_id=2)
-        for kind in ("User Story", "Story", "History", "Spike", "Technical Debt", "Bug"):
+        for kind in ("User Story", "Story", "History", "Spike", "Technical Debt", "Bug", "Habilitador Técnico"):
             with self.subTest(parent_type=kind):
                 self.items[1].fields["System.WorkItemType"] = kind
                 parent = self.invoke("get_my_daily_summary", story_id=1, sprint_path=manual_path)
@@ -230,7 +230,6 @@ class NativeServiceTests(unittest.TestCase):
             self.addCleanup(replacement.stop)
         services.WORK_ITEM_TYPE_CACHE.clear()
         services.WORK_ITEM_FIELD_CACHE.clear()
-        services.TEAM_CONTEXT_CACHE.clear()
 
     def get_item(self, id: int, **kwargs: Any) -> Any:
         return copy.deepcopy(self.items[int(id)])
@@ -274,7 +273,7 @@ class NativeServiceTests(unittest.TestCase):
         return created
 
     def invoke(self, name: str, **arguments: Any) -> Any:
-        if name in {"update_story_status", "add_story_comment", "update_work_item_content", "update_work_item_effort", "move_work_item_to_next_sprint"} and "expected_revision" not in arguments and "expected_revisions" not in arguments:
+        if name in {"update_story_status", "add_story_comment", "update_work_item_content", "update_task_fields", "update_work_item_effort", "move_work_item_to_next_sprint"} and "expected_revision" not in arguments and "expected_revisions" not in arguments:
             target_id = arguments.get("work_item_id", arguments.get("story_id"))
             arguments["expected_revision"] = self.items[target_id].rev
         if name in {"associate_story_branch", "create_story_pull_request"} and "expected_revisions" not in arguments:
@@ -593,6 +592,40 @@ class NativeServiceTests(unittest.TestCase):
             self.invoke("update_work_item_content", work_item_id=2, title="Approved title", expected_revision=6)
         self.assertEqual(self.items[2].fields["System.Title"], original)
 
+    def test_task_field_edit_uses_process_fields_and_confirms_values(self) -> None:
+        data = self.invoke(
+            "update_task_fields",
+            work_item_id=2,
+            fields={
+                "System.IterationPath": "Project\\Sprint 22",
+                "Microsoft.VSTS.Common.Priority": 2,
+            },
+            comment="Approved scope adjustment.",
+            expected_revision=7,
+        )
+        self.assertEqual(data["confirmed_fields"], {
+            "System.IterationPath": "Project\\Sprint 22",
+            "Microsoft.VSTS.Common.Priority": 2,
+        })
+        self.assertEqual(data["revision"], 8)
+        self.assertEqual(self.wit.update_work_item.call_args.kwargs["document"], [
+            {"op": "test", "path": "/rev", "value": 7},
+            {"op": "add", "path": "/fields/System.IterationPath", "value": "Project\\Sprint 22"},
+            {"op": "add", "path": "/fields/Microsoft.VSTS.Common.Priority", "value": 2},
+            {"op": "add", "path": "/fields/System.History", "value": "Approved scope adjustment."},
+        ])
+
+    def test_task_field_edit_rejects_protected_unsupported_and_non_task_fields(self) -> None:
+        for work_item_id, fields in (
+            (2, {"System.WorkItemType": "Bug"}),
+            (2, {"Custom.Unsupported": "No"}),
+            (1, {"System.Tags": "blocked"}),
+        ):
+            with self.subTest(work_item_id=work_item_id, fields=fields):
+                with self.assertRaises((ValueError, AzureCapabilityError)):
+                    self.invoke("update_task_fields", work_item_id=work_item_id, fields=fields, expected_revision=7)
+        self.wit.update_work_item.assert_not_called()
+
     def test_update_work_item_effort_preserves_empty_remaining_and_support_filter(self) -> None:
         self.wit.get_work_item_type_fields_with_references.return_value = [SimpleNamespace(reference_name="Microsoft.VSTS.Scheduling.CompletedWork")]
         data = self.invoke("update_work_item_effort", work_item_id=2, completed_work_hours=3, story_points=8, expected_revision=7)
@@ -805,3 +838,10 @@ class NativeServiceTests(unittest.TestCase):
         with self.assertRaises(AzureCapabilityError):
             self.invoke("associate_story_branch", **self.branch_request(source_branch="refs/heads/"))
         self.wit.update_work_item.assert_not_called()
+
+    def test_team_is_required_and_never_guessed(self) -> None:
+        with patch.dict(os.environ, {"AZURE_TEAM": " "}):
+            with self.assertRaisesRegex(ValueError, "AZURE_TEAM"):
+                services.get_team_context()
+        self.connection.clients.get_core_client.return_value.get_teams.assert_not_called()
+        self.assertEqual(services.get_team_context().team, "Main Team")

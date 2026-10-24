@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import time
 import logging
 import subprocess
 import re
@@ -13,11 +14,14 @@ from base64 import b64encode
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from urllib.request import Request, urlopen
 
 from azure.devops.v7_0.git.git_client import GitClient
-from azure.devops.v7_0.git.models import GitPullRequest, GitPullRequestSearchCriteria, GitRepository
+from azure.devops.v7_0.git.models import (
+    GitAsyncRefOperationParameters, GitAsyncRefOperationSource, GitPullRequest, GitPullRequestSearchCriteria,
+    GitRepository,
+)
 from azure.devops.v7_0.work.models import TeamSettingsIteration
 from azure.devops.v7_0.work_item_tracking.models import (
     IdentityRef, TeamContext, Wiql, WorkItem, WorkItemClassificationNode,
@@ -31,6 +35,10 @@ from .primitives import EXPECTED_REVISIONS, update_work_item, validate_revision
 
 DEFAULT_PULL_REQUEST_TARGET_BRANCH = "stage-pre-prod"
 COMPLETED_STATES = {"done", "closed", "resolved"}
+STORY_WORK_ITEM_TYPES = (
+    "User Story", "Story", "History", "História", "Spike", "Technical Debt", "Bug", "Habilitador Técnico", "Technical Enabler",
+)
+STORY_WORK_ITEM_TYPES_LOWER = frozenset(kind.lower() for kind in STORY_WORK_ITEM_TYPES)
 WORK_ITEM_TYPE_ALIASES = {
     "task": ("Task",),
     "tasks": ("Task",),
@@ -58,7 +66,6 @@ WORK_ITEM_FIELD_ALIASES = {
 }
 WORK_ITEM_TYPE_CACHE: dict[str, dict[str, str]] = {}
 WORK_ITEM_FIELD_CACHE: dict[tuple[str, str], set[str]] = {}
-TEAM_CONTEXT_CACHE: dict[str, str] = {}
 WORKSPACE_ROOT = workspace_root()
 TECHNICAL_DEBT_CONTEXT_DIR = WORKSPACE_ROOT / "AI_Tracking" / "Repo_Work_Item_Context" / "technical_debts"
 TECHNICAL_DEBT_PREVIEW_CACHE_DIR = WORKSPACE_ROOT / "AI_Tracking" / "Repo_Work_Item_Context" / "technical_debt_previews"
@@ -72,10 +79,7 @@ SIMILARITY_STOPWORDS = {
 ACTIVE_DAILY_SUMMARY_EXCLUDED_STATES = ("Closed", "Removed", "Done", "Resolved")
 
 def get_team_context() -> TeamContext:
-    team_name = _resolve_team_name()
-    if team_name:
-        return TeamContext(project=get_project(), team=team_name)
-    return TeamContext(project=get_project())
+    return TeamContext(project=get_project(), team=_resolve_team_name())
 
 
 def get_active_pr_search_criteria() -> GitPullRequestSearchCriteria:
@@ -1599,65 +1603,14 @@ def _extract_iteration_year(value: str | None) -> int | None:
     return int(match.group(1))
 
 
-def _resolve_team_name() -> str | None:
+def _resolve_team_name() -> str:
     configured_team = os.environ.get("AZURE_TEAM", "").strip()
-    if configured_team:
-        return configured_team
-
-    project = get_project()
-    cached_team = TEAM_CONTEXT_CACHE.get(project)
-    if cached_team:
-        return cached_team
-
-    connection = get_client()
-    core_client = connection.clients.get_core_client()
-    work_client = connection.clients.get_work_client()
-    current_year = datetime.now().year
-    team_candidates: list[dict[str, Any]] = []
-
-    for team in core_client.get_teams(project_id=project):
-        team_name = str(getattr(team, "name", "")).strip()
-        if not team_name:
-            continue
-
-        team_context = TeamContext(project=project, team=team_name)
-        try:
-            current_iterations = work_client.get_team_iterations(team_context, timeframe="current")
-        except Exception:
-            continue
-
-        for iteration in current_iterations or []:
-            iteration_name = str(getattr(iteration, "name", "")).strip()
-            iteration_path = str(getattr(iteration, "path", "")).strip()
-            if not iteration_path:
-                continue
-
-            team_candidates.append(
-                {
-                    "team_name": team_name,
-                    "iteration_name": iteration_name,
-                    "iteration_path": iteration_path,
-                    "iteration_year": _extract_iteration_year(iteration_path),
-                    "sprint_number": _extract_sprint_number(iteration_name or iteration_path),
-                }
-            )
-
-    if not team_candidates:
-        return None
-
-    selected_team = max(
-        team_candidates,
-        key=lambda candidate: (
-            candidate["iteration_year"] == current_year,
-            candidate["iteration_year"] or 0,
-            candidate["sprint_number"] or -1,
-            _is_plain_sprint_name(candidate["iteration_name"]),
-            candidate["iteration_path"],
-            candidate["team_name"],
-        ),
-    )
-    TEAM_CONTEXT_CACHE[project] = selected_team["team_name"]
-    return selected_team["team_name"]
+    if not configured_team:
+        raise ValueError(
+            "AZURE_TEAM não configurado. Defina o nome exato do time do Azure DevOps "
+            "(por exemplo, 'Squad Accountant e Admin') no .env; a escolha automática foi removida."
+        )
+    return configured_team
 
 
 def _get_current_sprint_context() -> dict[str, Any]:
@@ -2130,7 +2083,7 @@ def _query_assigned_items(email: str, sprint_path: str | None = None, *, in_prog
     if in_progress_only:
         project = get_project().replace("'", "''")
         scope = f"""[System.TeamProject] = '{project}'
-                    AND [System.WorkItemType] IN ('User Story', 'Story', 'History', 'Spike', 'Technical Debt', 'Bug', 'Task')
+                    AND [System.WorkItemType] IN ('User Story', 'Story', 'History', 'Spike', 'Technical Debt', 'Bug', 'Habilitador Técnico', 'Technical Enabler', 'Task')
           AND [System.State] IN ('Desenvolvimento', 'Active', 'In Progress', 'Em andamento')"""
 
     query = Wiql(query=f"""
@@ -2522,8 +2475,8 @@ def _build_daily_summary(email: str, sprint_path: str | None = None, story_id: i
         if isinstance(story_id, bool) or not isinstance(story_id, int) or story_id <= 0:
             raise ValueError("O ID da história da branch deve ser um inteiro positivo.")
         snapshot = _get_work_item_snapshot(get_client().clients.get_work_item_tracking_client(), story_id)
-        if str(snapshot.get("work_item_type") or "").lower() not in {"user story", "story", "history", "história", "spike", "technical debt", "bug"}:
-            raise ValueError("O item identificado na branch não é uma história (Story, Spike, Technical Debt ou Bug).")
+        if str(snapshot.get("work_item_type") or "").lower() not in STORY_WORK_ITEM_TYPES_LOWER:
+            raise ValueError("O item identificado na branch não é uma história (Story, Spike, Technical Debt, Bug ou Habilitador Técnico).")
         branch_sprint_path = snapshot.get("iteration_path")
         if not branch_sprint_path:
             raise ValueError("A história da branch não possui uma sprint associada.")
@@ -2880,7 +2833,7 @@ def _build_hierarchy_context(wit: WorkItemTrackingClient, item: WorkItem) -> dic
             issues.append({"code": "hierarchy_depth_limit"})
     types = {source_type, *(str(parent.get("work_item_type") or "").lower() for parent in ancestors)}
     missing_levels = [kind for kind in ("Feature", "Epic") if kind.lower() not in types]
-    if source_type == "task" and not types.intersection({"user story", "story", "history", "spike", "technical debt", "bug"}):
+    if source_type == "task" and not types.intersection(STORY_WORK_ITEM_TYPES_LOWER):
         missing_levels.insert(0, "Story")
     return {"source_id": source_id, "ancestors": ancestors,
             "missing_levels": missing_levels, "issues": issues, "complete": not missing_levels and not issues}
@@ -2951,6 +2904,11 @@ def _get_story_details(story_id: int) -> str:
         "acceptance_criteria": fields.get("Microsoft.VSTS.Common.AcceptanceCriteria"),
         "priority": fields.get("Microsoft.VSTS.Common.Priority"),
         "tags": fields.get("System.Tags"),
+        "field_values": {
+            reference: value for reference, value in fields.items()
+            if reference != "System.History"
+            and (isinstance(value, str) or type(value) in (bool, int, float) or value is None)
+        },
         "child_work_items": children,
         "hierarchy_context": _build_hierarchy_context(wit, item),
         "message": "\n".join(lines),
@@ -3218,6 +3176,207 @@ def _create_story_pull_request(
     return _format_json(preview_payload)
 
 
+PULL_REQUEST_ARTIFACT_PATTERN = re.compile(r"PullRequestId/[^/]+/[^/]+/(\d+)$")
+CHERRY_PICK_BRANCH_PATTERN = re.compile(r"^cherry-pick/KL-\d+-[a-z0-9][a-z0-9._-]*$")
+ON_TARGET_BRANCH_PATTERN = re.compile(r"^(?:feature|hotfix)/KL-\d+-[a-z0-9][a-z0-9-]*-on-[a-z0-9][a-z0-9._-]*$")
+CHERRY_PICK_TERMINAL_STATUSES = {"completed", "failed", "abandoned"}
+CHERRY_PICK_POLL_SECONDS = 2.0
+
+
+def _as_ref_name(branch: str) -> str:
+    normalized = str(branch or "").strip()
+    if not normalized:
+        raise ValueError("O nome da branch nao pode ser vazio.")
+    return normalized if normalized.startswith("refs/") else f"refs/heads/{normalized}"
+
+
+def _pull_request_state(pull_request: GitPullRequest) -> dict[str, Any]:
+    repository = getattr(pull_request, "repository", None)
+    repository_name = getattr(repository, "name", None)
+    summary = _build_pull_request_summary(pull_request, repository_name)
+    source_commit = getattr(pull_request, "last_merge_source_commit", None)
+    summary.update({
+        "status": str(getattr(pull_request, "status", "") or ""),
+        "merge_status": str(getattr(pull_request, "merge_status", "") or "") or None,
+        "source_commit_id": getattr(source_commit, "commit_id", None),
+        "repository_id": getattr(repository, "id", None),
+        "repository_name": repository_name,
+    })
+    return summary
+
+
+def _get_repository_pull_request(git: GitClient, repository: GitRepository, pull_request_id: int) -> GitPullRequest:
+    pull_request = git.get_pull_request_by_id(int(pull_request_id))
+    if str(getattr(getattr(pull_request, "repository", None), "id", "")) != str(repository.id):
+        raise ValueError(f"A PR {pull_request_id} nao pertence ao repositorio {repository.name}.")
+    return pull_request
+
+
+def _require_active_pull_request(pull_request: GitPullRequest, expected_source_commit: str) -> dict[str, Any]:
+    if not str(expected_source_commit or "").strip():
+        raise ValueError("expected_source_commit e obrigatorio e vem do preview aprovado.")
+    state = _pull_request_state(pull_request)
+    if state["status"].lower() != "active":
+        raise ValueError(f"A PR {state['pull_request_id']} nao esta ativa (status: {state['status']}).")
+    if state["source_commit_id"] != expected_source_commit:
+        raise ValueError("A branch de origem da PR mudou desde o preview aprovado; gere um novo preview.")
+    return state
+
+
+def _list_story_pull_requests(
+    story_id: int,
+    repository_name: str | None = None,
+    status: str = "active",
+    target_branch: str | None = None,
+) -> str:
+    """Lista as PRs vinculadas a uma historia, com estado e commit de origem."""
+    connection = get_client()
+    git = connection.clients.get_git_client()
+    wit = connection.clients.get_work_item_tracking_client()
+    snapshot = _get_work_item_snapshot(wit, int(story_id))
+    links = _extract_artifact_links(snapshot["relations"], allowed_names={"Pull Request"})
+    pull_request_ids = sorted({
+        int(match.group(1))
+        for link in links
+        if (match := PULL_REQUEST_ARTIFACT_PATTERN.search(unquote(str(link.get("url") or ""))))
+    })
+    wanted_status = str(status or "all").strip().lower()
+    wanted_target = _as_ref_name(target_branch) if target_branch else None
+    wanted_repository = str(repository_name or "").strip().lower()
+    pull_requests: list[dict[str, Any]] = []
+    for pull_request_id in pull_request_ids:
+        state = _pull_request_state(git.get_pull_request_by_id(pull_request_id))
+        if wanted_status != "all" and state["status"].lower() != wanted_status:
+            continue
+        if wanted_target and str(state["target_ref_name"]).lower() != wanted_target.lower():
+            continue
+        if wanted_repository and str(state["repository_name"] or "").lower() != wanted_repository:
+            continue
+        pull_requests.append(state)
+    return _format_json({"story_id": int(story_id), "count": len(pull_requests), "pull_requests": pull_requests})
+
+
+def _publish_story_pull_request(repository_name: str, pull_request_id: int, expected_source_commit: str) -> str:
+    """Tira uma PR de Draft, desde que ela siga ativa e inalterada desde o preview."""
+    connection = get_client()
+    git = connection.clients.get_git_client()
+    repository = _resolve_git_repository(git, repository_name)
+    pull_request = _get_repository_pull_request(git, repository, pull_request_id)
+    state = _require_active_pull_request(pull_request, expected_source_commit)
+    if not state["is_draft"]:
+        raise ValueError(f"A PR {pull_request_id} ja esta publicada.")
+    git.update_pull_request(
+        GitPullRequest(is_draft=False),
+        repository_id=repository.id,
+        pull_request_id=int(pull_request_id),
+        project=get_project(),
+    )
+    confirmed = _pull_request_state(_get_repository_pull_request(git, repository, pull_request_id))
+    if confirmed["is_draft"]:
+        raise RuntimeError(f"O Azure nao confirmou a publicacao da PR {pull_request_id}.")
+    return _format_json({"published": True, "pull_request": confirmed})
+
+
+def _cherry_pick_summary(cherry_pick: Any, generated_branch: str | None = None) -> dict[str, Any]:
+    detail = getattr(cherry_pick, "detailed_status", None)
+    status = str(getattr(cherry_pick, "status", "") or "")
+    return {
+        "cherry_pick_id": getattr(cherry_pick, "cherry_pick_id", None),
+        "status": status,
+        "completed": status.lower() == "completed",
+        "conflict": bool(getattr(detail, "conflict", False)),
+        "failure_message": getattr(detail, "failure_message", None),
+        "timedout": bool(getattr(detail, "timedout", False)),
+        "generated_branch": generated_branch,
+    }
+
+
+def _ref_exists(git: GitClient, repository_id: str, branch: str) -> bool:
+    refs = git.get_refs(repository_id=repository_id, project=get_project(), filter=f"heads/{branch}")
+    refs = getattr(refs, "value", refs) or []
+    return any(getattr(ref, "name", None) == f"refs/heads/{branch}" for ref in refs)
+
+
+def _cherry_pick_story_pull_request(
+    repository_name: str,
+    pull_request_id: int,
+    target_branch: str,
+    generated_branch: str,
+    expected_source_commit: str,
+    wait_seconds: int = 90,
+) -> str:
+    """Cria no Azure uma branch com o cherry-pick de uma PR ativa para outra branch alvo."""
+    normalized_target = str(target_branch or "").strip().removeprefix("refs/heads/")
+    normalized_generated = str(generated_branch or "").strip().removeprefix("refs/heads/")
+    legacy_name = CHERRY_PICK_BRANCH_PATTERN.match(normalized_generated) is not None
+    if not legacy_name and not ON_TARGET_BRANCH_PATTERN.match(normalized_generated):
+        raise ValueError("generated_branch deve seguir <feature|hotfix>/KL-<id>-<nome>-on-<branch-alvo>.")
+    if not normalized_target:
+        raise ValueError("target_branch e obrigatorio.")
+    connection = get_client()
+    git = connection.clients.get_git_client()
+    repository = _resolve_git_repository(git, repository_name)
+    pull_request = _get_repository_pull_request(git, repository, pull_request_id)
+    state = _require_active_pull_request(pull_request, expected_source_commit)
+    if _as_ref_name(normalized_target) in {state["source_ref_name"], state["target_ref_name"]}:
+        raise ValueError("A branch alvo do cherry-pick deve diferir da origem e do alvo da PR.")
+    if not _ref_exists(git, repository.id, normalized_target):
+        raise ValueError(f"A branch alvo {normalized_target} nao existe no Azure.")
+    expected_generated = f"{state['source_ref_name'].removeprefix('refs/heads/')}-on-{normalized_target}"
+    if not legacy_name and normalized_generated != expected_generated:
+        raise ValueError(f"generated_branch deve ser {expected_generated}.")
+    if _ref_exists(git, repository.id, normalized_generated):
+        raise ValueError(f"A branch {normalized_generated} ja existe; nao sera sobrescrita.")
+    try:
+        created = git.create_cherry_pick(
+            GitAsyncRefOperationParameters(
+                generated_ref_name=_as_ref_name(normalized_generated),
+                onto_ref_name=_as_ref_name(normalized_target),
+                source=GitAsyncRefOperationSource(pull_request_id=int(pull_request_id)),
+            ),
+            project=get_project(),
+            repository_id=repository.id,
+        )
+    except Exception as error:
+        # A rejected request that left no branch behind is a confirmed failure, safe to fall back from.
+        if _ref_exists(git, repository.id, normalized_generated):
+            raise
+        return _format_json({
+            "cherry_pick_id": None, "status": "failed", "completed": False, "conflict": False,
+            "timedout": False, "failure_message": f"{type(error).__name__}: {error}",
+            "generated_branch": normalized_generated, "pull_request_id": int(pull_request_id),
+            "target_branch": normalized_target,
+        })
+    cherry_pick_id = getattr(created, "cherry_pick_id", None)
+    if cherry_pick_id is None:
+        raise RuntimeError("O Azure nao retornou o id do cherry-pick.")
+    deadline = time.monotonic() + max(0, int(wait_seconds))
+    current = created
+    while str(getattr(current, "status", "")).lower() not in CHERRY_PICK_TERMINAL_STATUSES:
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(CHERRY_PICK_POLL_SECONDS)
+        current = git.get_cherry_pick(
+            project=get_project(), cherry_pick_id=cherry_pick_id, repository_id=repository.id,
+        )
+    return _format_json({
+        **_cherry_pick_summary(current, normalized_generated),
+        "pull_request_id": int(pull_request_id),
+        "target_branch": normalized_target,
+    })
+
+
+def _get_story_cherry_pick(repository_name: str, cherry_pick_id: int) -> str:
+    """Consulta o andamento de um cherry-pick criado no Azure."""
+    connection = get_client()
+    git = connection.clients.get_git_client()
+    repository = _resolve_git_repository(git, repository_name)
+    current = git.get_cherry_pick(
+        project=get_project(), cherry_pick_id=int(cherry_pick_id), repository_id=repository.id,
+    )
+    return _format_json(_cherry_pick_summary(current))
+
+
 def _create_work_item(
     work_item_type: str,
     title: str,
@@ -3445,6 +3604,88 @@ def _update_work_item_content(
             "comment_added": bool(normalized_comment),
             "description_format": "azure_simple_html" if description is not None else None,
             "acceptance_criteria_format": "azure_simple_html" if acceptance_criteria is not None else None,
+        },
+    )
+
+
+_TASK_FIELD_REFERENCE_BLOCKLIST = frozenset({
+    "System.Id",
+    "System.WorkItemType",
+    "System.Rev",
+    "System.TeamProject",
+    "System.NodeName",
+    "System.AreaId",
+    "System.IterationId",
+    "System.CreatedBy",
+    "System.CreatedDate",
+    "System.ChangedBy",
+    "System.ChangedDate",
+    "System.AuthorizedAs",
+    "System.AuthorizedDate",
+    "System.RevisedDate",
+    "System.Watermark",
+    "System.History",
+})
+
+
+def _task_field_value(value: Any) -> bool:
+    return (isinstance(value, str) and bool(value.strip())) or (
+        type(value) in (bool, int, float) and (not isinstance(value, float) or math.isfinite(value))
+    )
+
+
+def _update_task_fields(
+    work_item_id: int,
+    fields: dict[str, Any],
+    comment: str | None = None,
+) -> str:
+    if not isinstance(fields, dict) or not fields:
+        raise ValueError("fields must be a non-empty object.")
+    if any(not isinstance(reference, str) or not reference.strip() or not _task_field_value(value)
+           for reference, value in fields.items()):
+        raise ValueError("Task fields require non-empty references and scalar values.")
+
+    connection = get_client()
+    wit = connection.clients.get_work_item_tracking_client()
+    current_item = wit.get_work_item(id=work_item_id, fields=[
+        "System.Id",
+        "System.WorkItemType",
+    ])
+    work_item_type = str(current_item.fields.get("System.WorkItemType") or "").strip()
+    if work_item_type.casefold() != "task":
+        raise ValueError("Generic field edits are only supported for Tasks.")
+    supported_fields = _get_supported_work_item_fields(wit, work_item_type)
+    blocked = sorted(reference for reference in fields
+                     if reference in _TASK_FIELD_REFERENCE_BLOCKLIST or reference not in supported_fields)
+    if blocked:
+        raise ValueError(
+            "Unsupported or protected Task fields: " + ", ".join(blocked)
+        )
+
+    document = [
+        {"op": "add", "path": f"/fields/{reference}", "value": value}
+        for reference, value in fields.items()
+    ]
+    normalized_comment = str(comment or "").strip()
+    if normalized_comment:
+        document.append({"op": "add", "path": "/fields/System.History", "value": normalized_comment})
+    updated_item = update_work_item(wit, document=document, id=work_item_id)
+    updated_fields = _work_item_fields(updated_item)
+    mismatched = [
+        reference for reference, value in fields.items()
+        if updated_fields.get(reference) != value
+    ]
+    if mismatched:
+        raise RuntimeError(
+            "Azure did not confirm the approved Task field values: " + ", ".join(mismatched)
+        )
+    return _serialize_work_item_payload(
+        updated_item,
+        {
+            "requested_fields": sorted(fields),
+            "applied_fields": sorted(fields),
+            "confirmed_fields": {reference: updated_fields[reference] for reference in fields},
+            "comment_added": bool(normalized_comment),
         },
     )
 
